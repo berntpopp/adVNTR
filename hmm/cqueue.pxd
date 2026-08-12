@@ -1,6 +1,6 @@
 # cqueue.pxd
 
-cdef extern from "queue.h":
+cdef extern from "queue.h" nogil:
     ctypedef struct Queue:
         pass
     ctypedef void* QueueValue

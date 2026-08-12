@@ -16,7 +16,7 @@ import unittest
 from advntr_harness.capture import (_ModelCache, canonical_fixture_rows,
                                     read_fixture_file)
 from advntr_harness.fingerprint import comparable_fingerprint
-from advntr_harness.strata import STRATUM_NAMES
+from advntr_harness.strata import OPTIONAL_STRATA, STRATUM_NAMES
 
 GOLDEN = os.path.join(os.path.dirname(__file__), 'golden')
 MODELS = os.path.join(GOLDEN, 'models')
@@ -48,12 +48,26 @@ class TestTier1Golden(unittest.TestCase):
         """One per orientation. A mismatch means capture and gate disagree on shape."""
         self.assertEqual(len(self.expected), 2 * len(self.sequences))
 
-    def test_every_stratum_is_populated(self):
-        """An empty stratum makes the gate vacuous for whatever it was meant to catch."""
+    def test_every_required_stratum_is_populated(self):
+        """An empty stratum makes the gate vacuous for whatever it was meant to catch.
+
+        OPTIONAL_STRATA are exempt with a recorded reason; today that is only
+        neg_inf_rejected, which is unreachable because dp_score_threshold (-367.26)
+        never rejects a >=135bp sequence -- measured, poly-A scores -335.85.
+        """
         strata = self.manifest['strata']
         for name in STRATUM_NAMES:
             self.assertIn(name, strata)
+            if name in OPTIONAL_STRATA:
+                continue
             self.assertGreater(strata[name], 0, 'stratum %r is empty' % name)
+
+    def test_optional_strata_each_carry_a_reason(self):
+        """An exemption without a stated reason is just a disabled test."""
+        for name, reason in OPTIONAL_STRATA.items():
+            self.assertIn(name, STRATUM_NAMES)
+            self.assertTrue(reason and len(reason) > 20,
+                            'stratum %r is exempt without a real reason' % name)
 
     def test_the_reverse_complement_stratum_is_present(self):
         """The stratum upstream PR #57 would delete. Measured at 0.26% of reads, and

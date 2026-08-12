@@ -1,0 +1,84 @@
+{
+  "files": [
+    {
+      "assembly": "hg19", 
+      "attempt_count": 3234, 
+      "eligible_count": 1617, 
+      "input_digest": "11411bbeb57b301b87de14f3b68f6cb05497e976ab5bcfd8cf243a1b8730989f", 
+      "model_key": "hg19@151", 
+      "output_digest": "e771969ea797d4ce8ed1c09b7a9884f51e1beeb570daf33978335fcc15d41577", 
+      "read_length": 151, 
+      "source_file": "example_7a61_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 12784, 
+      "eligible_count": 6392, 
+      "input_digest": "a3963b4a999fde0d096f8f16539fd804969a6fbfe30b642b5631b771691a202e", 
+      "model_key": "hg19@151", 
+      "output_digest": "dd52b336cb58395effcf43e4c96dcf10a45d99b9bf18fd537ed1080ae1ed42fb", 
+      "read_length": 151, 
+      "source_file": "example_b178_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 18952, 
+      "eligible_count": 9476, 
+      "input_digest": "f7894997ecba1d56536ed581f756988fb477cc61ecc0b732512c313696b895ac", 
+      "model_key": "hg19@149", 
+      "output_digest": "166a215fe604ae232b9bb15c464deda629a5a4cd3cec7a8fc0a1bb02dd2ef134", 
+      "read_length": 149, 
+      "source_file": "example_a5c1_hg19_subset.bam"
+    }
+  ], 
+  "fixture_models": {
+    "hg19@149": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f2d66468d7de", 
+      "n_states": 2553, 
+      "read_length": 149, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }, 
+    "hg19@151": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f4223f1451e6", 
+      "n_states": 2565, 
+      "read_length": 151, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }
+  }, 
+  "global_digest": "230c57746e9ef05141c0c3dc1b4d4f22c1708f9fe7862f7f9510f0eba055fb4f", 
+  "kernel_provenance": {
+    "hmm/base.pxd": "6aca8f9953f89e93", 
+    "hmm/base.pyx": "2ab32120313301ab", 
+    "hmm/cqueue.pxd": "bae2495f20274170", 
+    "hmm/hmm.pyx": "e87fabf5e8633235", 
+    "hmm/queue.c": "4bd388222b50c954", 
+    "loaded_so": "4f08f2a916f27db8"
+  }, 
+  "model_contexts": {
+    "hg19@149": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f2d66468d7de", 
+      "n_states": 2553, 
+      "read_length": 149, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }, 
+    "hg19@151": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f4223f1451e6", 
+      "n_states": 2565, 
+      "read_length": 151, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }
+  }, 
+  "strata": {
+    "general": 1728, 
+    "longest_sequence": 23, 
+    "lowest_surviving_logp": 128, 
+    "neg_inf_rejected": 0, 
+    "reverse_complement_wins": 77, 
+    "shortest_sequence": 44
+  }, 
+  "tier": 1
+}

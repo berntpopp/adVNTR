@@ -1,5 +1,3 @@
-# distutils: sources = hmm/queue.c
-# distutils: include_dirs = hmm
 
 #cython: boundscheck=False
 #cython: cdivision=True
@@ -13,77 +11,124 @@ from .base cimport State
 import numpy as np
 cimport numpy as np
 from libc.math cimport log
+from libc.stdlib cimport malloc, realloc, free
 
 cimport cython
 
-cimport cqueue
 
-cdef class Queue(object):
-    """A queue class for C integer values.
 
-    >>> q = Queue()
-    >>> q.append(5)
-    >>> q.peek()
-    5
-    >>> q.pop()
-    5
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef int _viterbi_fill(int[::1] encoded_sequence,
+                        double[::1,:] dynamic_table,
+                        int[::1,:] vpath_table_row,
+                        int[::1,:] vpath_table_col,
+                        int[::1] indptr,
+                        int[::1] indices,
+                        unsigned char[::1] silent,
+                        double[:, ::1] emissions,
+                        double[::1] weights,
+                        double threshold,
+                        int sequence_length,
+                        int start_index) nogil:
+    """Fill the Viterbi DP table. Pure C -- runs with the GIL released.
+
+    This is the body that used to live inline in Model.viterbi plus
+    Model.__update_dynamic_table. It touches no Python object: the graph arrives as
+    CSR (`indptr`/`indices`), emissions as a flat (state, base) table, and silence as
+    a byte flag, all built once in bake(). Relaxation order is unchanged -- neighbours
+    are still visited in the ascending order bake() sorted them into -- so the
+    resulting logp and path are bit-identical to the pre-nogil version.
     """
-    cdef cqueue.Queue* _c_queue
-    def __cinit__(self):
-        self._c_queue = cqueue.queue_new()
-        if self._c_queue is NULL:
-            raise MemoryError()
+    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end
+    cdef double log_prob, emission, current
 
-    def __dealloc__(self):
-        if self._c_queue is not NULL:
-            cqueue.queue_free(self._c_queue)
+    # Two array-backed FIFOs replacing the linked-list Queue, whose queue_push_tail
+    # malloc'd a 24-byte node per relaxation (~1.5M malloc/free pairs per call).
+    # Push at tail, pop at head, never wrap: byte-for-byte the same visit ORDER the
+    # linked list produced. Order is load-bearing -- the relaxation guard is
+    # `> 1e-10`, not `> 0`, so this is not an order-independent fixpoint and a LIFO
+    # would silently change vpath.
+    cdef int cur_cap = 4096, nxt_cap = 4096
+    cdef int cur_head = 0, cur_tail = 0, nxt_head = 0, nxt_tail = 0
+    cdef int* cur = <int*> malloc(cur_cap * sizeof(int))
+    cdef int* nxt = <int*> malloc(nxt_cap * sizeof(int))
+    cdef int* swap_buf
+    cdef int* grown
+    cdef int swap_int
 
-    cpdef append(self, int value):
-        if not cqueue.queue_push_tail(self._c_queue,
-                                      <void*> <Py_ssize_t> value):
-            raise MemoryError()
+    if cur == NULL or nxt == NULL:
+        free(cur)
+        free(nxt)
+        return -1
 
-    # The `cpdef` feature is obviously not available for the original "extend()"
-    # method, as the method signature is incompatible with Python argument
-    # types (Python does not have pointers).  However, we can rename
-    # the C-ish "extend()" method to e.g. "extend_ints()", and write
-    # a new "extend()" method that provides a suitable Python interface by
-    # accepting an arbitrary Python iterable.
-    cpdef extend(self, values):
-        for value in values:
-            self.append(value)
+    nxt[0] = start_index
+    nxt_tail = 1
 
-    cdef extend_ints(self, int* values, size_t count):
-        cdef int value
-        for value in values[:count]:  # Slicing pointer to limit the iteration boundaries.
-            self.append(value)
+    for col in range(sequence_length):
+        swap_buf = cur; cur = nxt; nxt = swap_buf
+        swap_int = cur_cap; cur_cap = nxt_cap; nxt_cap = swap_int
+        cur_head = 0
+        cur_tail = nxt_tail
+        nxt_head = 0
+        nxt_tail = 0
 
-    cpdef int peek(self) except? -1:
-        cdef int value = <Py_ssize_t> cqueue.queue_peek_head(self._c_queue)
+        if cur_head == cur_tail:
+            break
 
-        if value == 0:
-            # this may mean that the queue is empty,
-            # or that it happens to contain a 0 value
-            if cqueue.queue_is_empty(self._c_queue):
-                raise IndexError("Queue is empty")
-        return value
+        ch = encoded_sequence[col]
+        next_col = col + 1
 
-    cpdef int pop(self) except? -1:
-        if cqueue.queue_is_empty(self._c_queue):
-            raise IndexError("Queue is empty")
-        return <Py_ssize_t> cqueue.queue_pop_head(self._c_queue)
+        while cur_head < cur_tail:
+            row = cur[cur_head]
+            cur_head += 1
+            start = indptr[row]
+            end = indptr[row + 1]
+            current = dynamic_table[row, col]
 
-    cdef bint is_empty(self):
-        return cqueue.queue_is_empty(self._c_queue)
+            if silent[row]:  # Silent state: stay in the same column
+                for k in range(start, end):
+                    neighbor_state_index = indices[k]
+                    log_prob = current + weights[k]
 
-    def __bool__(self):
-        return not cqueue.queue_is_empty(self._c_queue)
+                    if log_prob - dynamic_table[neighbor_state_index, col] > 1e-10 and log_prob >= threshold:
+                        if cur_tail == cur_cap:
+                            grown = <int*> realloc(cur, 2 * cur_cap * sizeof(int))
+                            if grown == NULL:
+                                free(cur)
+                                free(nxt)
+                                return -1
+                            cur = grown
+                            cur_cap *= 2
+                        cur[cur_tail] = neighbor_state_index
+                        cur_tail += 1
+                        dynamic_table[neighbor_state_index, col] = log_prob
+                        vpath_table_row[neighbor_state_index, col] = row
+                        vpath_table_col[neighbor_state_index, col] = col
+            else:  # Emitting state: consume a character and advance a column
+                emission = emissions[row, ch]
+                for k in range(start, end):
+                    neighbor_state_index = indices[k]
+                    log_prob = current + weights[k] + emission
 
-    @staticmethod
-    def swap_queue(Queue q1, Queue q2):
-        cdef cqueue.Queue* temp = q2._c_queue
-        q2._c_queue = q1._c_queue
-        q1._c_queue = temp
+                    if log_prob - dynamic_table[neighbor_state_index, next_col] > 1e-10 and log_prob >= threshold:
+                        if nxt_tail == nxt_cap:
+                            grown = <int*> realloc(nxt, 2 * nxt_cap * sizeof(int))
+                            if grown == NULL:
+                                free(cur)
+                                free(nxt)
+                                return -1
+                            nxt = grown
+                            nxt_cap *= 2
+                        nxt[nxt_tail] = neighbor_state_index
+                        nxt_tail += 1
+                        dynamic_table[neighbor_state_index, next_col] = log_prob
+                        vpath_table_row[neighbor_state_index, next_col] = row
+                        vpath_table_col[neighbor_state_index, next_col] = col
+
+    free(cur)
+    free(nxt)
+    return 0
 
 
 cdef class Model(object):
@@ -107,9 +152,19 @@ cdef class Model(object):
     cdef public dict transition_map
     cdef public dict neighbors
     # 2D matrix (After conforming the topology, create one matrix for visualization)
-    cdef double[::1,:] transition_matrix
+    cdef double[:, ::1] transition_matrix
     # cdef int[:,:] neighboring_state_indices
     cdef dict state_to_index
+
+    # Flat, index-addressed mirrors of the graph, built in bake() and read by the
+    # Viterbi DP. Same content as `neighbors` / `State.is_silent()` /
+    # `DiscreteDistribution.log_emission`, but reachable without touching a Python
+    # object, so the inner loop can run without the GIL.
+    cdef public int[::1] nbr_indptr        # CSR row pointers, length n_states + 1
+    cdef public int[::1] nbr_indices       # CSR column indices, length n_edges
+    cdef public double[::1] nbr_logp       # CSR edge weights, PARALLEL to nbr_indices
+    cdef public unsigned char[::1] silent  # 1 if state emits nothing
+    cdef public double[:, ::1] emissions   # log emission per (state, base in 0..3)
 
     # edges
     cdef list edges
@@ -281,7 +336,7 @@ cdef class Model(object):
         self.transition_map = transition_map
 
 
-        self.transition_matrix = np.zeros((self.n_states, self.n_states), dtype=np.double, order='F')
+        self.transition_matrix = np.zeros((self.n_states, self.n_states), dtype=np.double, order='C')
         cdef int from_index = 0
         cdef int to_index = 0
         for from_state in transition_map.keys():
@@ -291,6 +346,54 @@ cdef class Model(object):
                 from_index = self.state_to_index[from_state]
                 to_index = self.state_to_index[to_state]
                 self.transition_matrix[from_index][to_index] = log(outgoing_states[to_state])
+
+        # Flatten the graph into CSR + per-state emission/silence tables. Built from
+        # exactly the structures the DP used to walk at runtime, so the DP reads the
+        # same numbers in the same order -- it just stops paying for a dict lookup
+        # keyed by a Python State object on every (state, column) visit.
+        indptr = np.zeros(self.n_states + 1, dtype=np.intc)
+        silent = np.zeros(self.n_states, dtype=np.uint8)
+        # -inf, NOT zero. A zero-filled table turns a symbol the distribution never
+        # declared into log(1.0) -- certainty -- whereas DiscreteDistribution.__getitem__
+        # (hmm/base.pyx:12) raised KeyError. That would convert a loud failure into a
+        # silent wrong answer. The assertion below makes sure the question never arises.
+        emissions = np.full((self.n_states, 4), -np.inf, dtype=np.double)
+        for state, index in self.state_to_index.items():
+            nbrs = self.neighbors.get(state, [])
+            indptr[index + 1] = len(nbrs)
+            if state.distribution is None:
+                silent[index] = 1
+            else:
+                for base, logp in state.distribution.log_emission.items():
+                    emissions[index][base] = logp
+                if np.any(np.isneginf(emissions[index])):
+                    raise ValueError(
+                        'emitting state %d does not declare all of A/C/G/T; a baked '
+                        'model must be complete, and the flat emission cache has no '
+                        'way to reproduce the KeyError the dict lookup used to raise'
+                        % index)
+        indptr = np.cumsum(indptr).astype(np.intc)
+        flat_indices = np.zeros(indptr[self.n_states], dtype=np.intc)
+        flat_logp = np.zeros(indptr[self.n_states], dtype=np.double)
+        for state, index in self.state_to_index.items():
+            nbrs = self.neighbors.get(state, [])
+            flat_indices[indptr[index]:indptr[index] + len(nbrs)] = nbrs
+            # COPY the double already in transition_matrix. Do NOT re-evaluate
+            # log(p): libm's log is not correctly rounded and can differ in the
+            # last ulp across versions, which would break bit-equivalence.
+            for offset, nb in enumerate(nbrs):
+                flat_logp[indptr[index] + offset] = self.transition_matrix[index][nb]
+            # The DP hoists `dynamic_table[row, col]` out of the neighbour loop,
+            # which is only sound if a silent state can never relax itself.
+            if silent[index] and index in nbrs:
+                raise ValueError(
+                    'silent self-loop on state %d: the Viterbi DP hoists the '
+                    'source cell out of the neighbour loop and would diverge' % index)
+        self.nbr_indptr = indptr
+        self.nbr_indices = flat_indices
+        self.nbr_logp = flat_logp
+        self.silent = silent
+        self.emissions = emissions
 
         # self.neighboring_state_indices = np.zeros((self.n_states, self.n_states), dtype=np.int)
         # for from_state in transition_map.keys():
@@ -308,6 +411,15 @@ cdef class Model(object):
         #     self.repeat_end_index = self.state_to_index[repeat_matcher_model.end]
 
         self.is_baked = True
+
+    def transition_matrix_view(self):
+        """Read-only view of the dense transition matrix. For tests only.
+
+        `transition_matrix` is a private cdef attribute; exposing a numpy view lets the
+        CSR invariant tests prove that `nbr_logp` was COPIED from it rather than
+        recomputed with log(), without making the matrix itself writable from Python.
+        """
+        return np.asarray(self.transition_matrix)
 
     def _sort_states(self):
         """
@@ -802,47 +914,25 @@ cdef class Model(object):
         cdef int row, col
         cdef int ch
 
-        cdef Queue current_states = Queue()
-        cdef Queue next_states = Queue()
-        next_states.append(self.state_to_index[self.start])  # At the beginning, only the start state has a probability
+        # Hoist the flat tables into locals so the DP can run with the GIL released:
+        # attribute access on self would need it back.
+        cdef int[::1] indptr = self.nbr_indptr
+        cdef int[::1] indices = self.nbr_indices
+        cdef unsigned char[::1] silent = self.silent
+        cdef double[:, ::1] emissions = self.emissions
+        cdef double[::1] weights = self.nbr_logp
+        cdef double threshold = self.dp_score_threshold
+        cdef int start_index = self.state_to_index[self.start]
 
-        for col in range(sequence_length):
-            Queue.swap_queue(current_states, next_states)
+        cdef int fill_status = 0
+        with nogil:
+            fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
+                          vpath_table_col, indptr, indices, silent, emissions,
+                          weights, threshold, sequence_length,
+                          start_index)
+        if fill_status != 0:
+            raise MemoryError('Viterbi work queue could not be grown')
 
-            if current_states.is_empty(): # No other update is needed, so break
-                break
-
-            while not current_states.is_empty():
-                row = current_states.pop()
-                state = self.states[row]
-                ch = encoded_sequence[col]
-                self.__update_dynamic_table(row, col, ch, state, vpath_table_row, vpath_table_col, dynamic_table, current_states, next_states)
-
-        # for col in range(sequence_length):
-        #     # Filling out suffix matcher table once
-        #     for row in range(0, repeat_start_index):
-        #         if col != 0 and dynamic_table[row][col] < self.dp_score_threshold:
-        #             continue
-        #         state = self.states[row]
-        #         ch = encoded_sequence[col]
-        #         self._update_dynamic_table(row, col, ch, state, vpath_table_row, vpath_table_col, dynamic_table)
-        #
-        #     # Filling out repeat matcher table twice
-        #     for iteration in range(2):
-        #         for row in range(repeat_start_index, repeat_end_index+1):
-        #             if col != 0 and dynamic_table[row][col] < self.dp_score_threshold:
-        #                 continue
-        #             state = self.states[row]
-        #             ch = encoded_sequence[col]
-        #             self._update_dynamic_table(row, col, ch, state, vpath_table_row, vpath_table_col, dynamic_table)
-        #
-        #     # Filling out prefix matcher table once
-        #     for row in range(repeat_end_index+1, len(self.states)):
-        #         if col != 0 and dynamic_table[row][col] < self.dp_score_threshold:
-        #                 continue
-        #         state = self.states[row]
-        #         ch = encoded_sequence[col]
-        #         self._update_dynamic_table(row, col, ch, state, vpath_table_row, vpath_table_col, dynamic_table)
 
         # For the last update
         col = sequence_length
@@ -879,102 +969,10 @@ cdef class Model(object):
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
-    cdef void __update_dynamic_table(self,
-                               int row,
-                               int col,
-                               char ch,
-                               State state,
-                               int[::1,:] vpath_table_row,
-                               int[::1,:] vpath_table_col,
-                               double[::1,:] dynamic_table,
-                               Queue current_states,
-                               Queue next_states):
-
-        neighbor_indices = self.neighbors[state]
-        cdef int neighbor_state_index = 0
-        cdef double log_prob = 0
-
-        if state.is_silent():  # Silent state: Stay in the same column
-            for neighbor_state_index in neighbor_indices:
-                log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index]
-
-                if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10 and log_prob >= self.dp_score_threshold:
-                    current_states.append(neighbor_state_index)
-
-                    dynamic_table[neighbor_state_index][col] = log_prob
-                    vpath_table_row[neighbor_state_index][col] = row
-                    vpath_table_col[neighbor_state_index][col] = col
-        else:  # Not a silent state: Emit a character and move to the next column
-            for neighbor_state_index in neighbor_indices:
-                # print("row {} neighbor state index {}".format(row, neighbor_state_index))
-                log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index] + state.distribution[ch]
-
-                if log_prob - dynamic_table[neighbor_state_index][col + 1] > 1e-10 and log_prob >= self.dp_score_threshold:
-                    next_states.append(neighbor_state_index)
-
-                    dynamic_table[neighbor_state_index][col + 1] = log_prob
-                    vpath_table_row[neighbor_state_index][col + 1] = row
-                    vpath_table_col[neighbor_state_index][col + 1] = col
 
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
-    cdef void _update_dynamic_table(self,
-                               int row,
-                               int col,
-                               char ch,
-                               State state,
-                               int[::1,:] vpath_table_row,
-                               int[::1,:] vpath_table_col,
-                               double[::1,:] dynamic_table):
-
-        # cdef int neighbor_state_index = 0
-        # cdef double log_prob = 0
-        #
-        # cdef int[:] neighbor_mat = self.neighboring_state_indices[self.state_to_index[state]]
-        # if state.is_silent():  # Silent state: Stay in the same column
-        #     for neighbor_state_index in range(self.n_states):
-        #         if neighbor_mat[neighbor_state_index] == 1:
-        #             log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index]
-        #
-        #             if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-        #                 dynamic_table[neighbor_state_index][col] = log_prob
-        #                 vpath_table_row[neighbor_state_index][col] = row
-        #                 vpath_table_col[neighbor_state_index][col] = col
-        # else:  # Not a silent state: Emit a character and move to the next column
-        #     for neighbor_state_index in range(self.n_states):
-        #         if neighbor_mat[neighbor_state_index] == 1:
-        #             log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index] + state.distribution[ch]
-        #
-        #             if log_prob - dynamic_table[neighbor_state_index][col + 1] > 1e-10:
-        #                 dynamic_table[neighbor_state_index][col + 1] = log_prob
-        #                 vpath_table_row[neighbor_state_index][col + 1] = row
-        #                 vpath_table_col[neighbor_state_index][col + 1] = col
-
-
-        neighbor_states = self.transition_map[state]
-        cdef int neighbor_state_index = 0
-        cdef double log_prob = 0
-
-        if state.is_silent():  # Silent state: Stay in the same column
-            for neighbor_state in neighbor_states:
-                neighbor_state_index = self.state_to_index[neighbor_state]
-                # prob = dynamic_table[row][col] + log(self.transition_map[state][neighbor_state])
-                log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index]
-
-                if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-                    dynamic_table[neighbor_state_index][col] = log_prob
-                    vpath_table_row[neighbor_state_index][col] = row
-                    vpath_table_col[neighbor_state_index][col] = col
-        else:  # Not a silent state: Emit a character and move to the next column
-            for neighbor_state in neighbor_states:
-                neighbor_state_index = self.state_to_index[neighbor_state]
-                log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index] + state.distribution[ch]
-
-                if log_prob - dynamic_table[neighbor_state_index][col + 1] > 1e-10:
-                    dynamic_table[neighbor_state_index][col + 1] = log_prob
-                    vpath_table_row[neighbor_state_index][col + 1] = row
-                    vpath_table_col[neighbor_state_index][col + 1] = col
 
     def check_sanity_of_transition_prob(self, verbose):
         for subModel in self.subModels:
