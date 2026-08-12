@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This is a hard fork (see FORK.md). Fail loudly if an upstream remote reappears.
+      - name: Refuse an upstream remote
+        run: |
+          if git remote | grep -qx upstream; then
+            echo "ERROR: an 'upstream' remote exists. This is a hard fork; see FORK.md."
+            exit 1
+          fi
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: '2.7'
+          channels: conda-forge,bioconda,defaults
+          auto-activate-base: false
+          activate-environment: envadvntr
+
+      - name: Install dependencies
+        run: |
+          conda install -y "cython=0.29.*" "numpy=1.16.*" scipy biopython pysam muscle scikit-learn "coverage<5"
+
+      - name: Build the extension
+        run: python setup_hmm.py build_ext --inplace
+
+      # Ordered so a size or import regression fails before the slow steps.
+      - name: File-size ratchet
+        run: python scripts/loc_ratchet.py
+
+      - name: Unit suite and Tier 1 equivalence gate
+        run: python -m unittest discover tests
+
+      - name: Coverage ratchet
+        run: make coverage-ratchet

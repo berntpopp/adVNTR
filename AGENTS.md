@@ -1,0 +1,220 @@
+# AGENTS.md
+
+Instructions for anyone — human or agent — changing this repository.
+
+## Project
+
+`berntpopp/adVNTR` is a **hard fork** of `mehrdadbakhtiari/adVNTR`, maintained to serve
+[VNtyper](https://github.com/hassansaei/VNtyper)'s MUC1-VNTR genotyping. Read
+[FORK.md](FORK.md) first: it records the divergence point, the supported surface, and why
+there is no `upstream` remote.
+
+The supported path is exactly one command:
+
+```
+advntr genotype -fs -vid 25561 --alignment_file X.bam -o out.vcf \
+       -m muc1.db --working_directory D -t N -aln
+```
+
+Everything else (`makedb`, copy-number genotyping, PacBio, plotting) still compiles and
+imports, but is untested and unsupported.
+
+**Where the time goes.** Profiled on `example_7a61_hg19_subset.bam`:
+`select_illumina_reads` was 196.3 s of a 197 s run — **99.7 %**. It calls `hmm.viterbi`
+twice per read (forward and reverse complement) against a ~2565-state profile HMM. Model
+construction is 0.33 s and frameshift analysis 0.29 s; both are noise. Optimise the
+decoder or you are not optimising this tool.
+
+## Setup
+
+Everything runs in the `envadvntr` conda environment (Python 2.7.15, Cython 0.29.15,
+NumPy 1.16.5).
+
+```bash
+export PATH=/home/bernt-popp/miniforge3/envs/envadvntr/bin:$PATH
+```
+
+`muscle` must be on `$PATH` — it lives in that env, and model construction shells out to
+it. Without it you get `Bio.Application.ApplicationError: Non-zero return code 127`, which
+does not mention muscle in its first line.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `make build` | Rebuild `hmm/` in place (fast dev loop) |
+| `make test` | Unit suite |
+| `make gate` | Everything CI runs: remote check, build, tests, coverage ratchet |
+| `make coverage-ratchet` | Fail if coverage of `advntr/` + `hmm/` fell |
+| `make no-upstream-remote` | Fail if an `upstream` remote exists |
+| `python setup.py build_ext --inplace` | Full package build |
+| `python -m advntr_harness.capture --tier 1 --out tests/golden` | Re-capture Tier 1 fixtures |
+| `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | Full-corpus equivalence check |
+
+## Layout
+
+```
+advntr/            The tool. genotype -fs lives in vntr_finder.py + genome_analyzer.py.
+hmm/               The live HMM backend (Cython). hmm.pyx is the Viterbi decoder.
+pomegranate/       DEAD. Not compiled, not supported. See FORK.md.
+advntr_harness/    Equivalence harness. Not shipped; imported by tests.
+tests/golden/      Committed fixtures + manifests. The decoder's regression net.
+filtering/         Standalone C++ k-mer prefilter. Not built. See Traps.
+```
+
+## Code style
+
+- **Python 2.7.** No f-strings, no `pathlib`, no type hints, no `concurrent.futures`.
+  Use `%` formatting.
+- Docstrings say *why*, not *what*. If a line encodes a non-obvious decision, cite the
+  file:line it mirrors or the measurement that justifies it.
+- Cite measurements, not intuitions. "61.1 ms/attempt on the pristine build" beats "slow".
+
+## Changing existing code
+
+### File size
+
+New files must be under **650 LOC**. These are already over and may **only shrink** — if
+you touch one, leave it smaller than you found it:
+
+| File | LOC |
+|---|---|
+| `advntr/plot.py` | 1445 |
+| `advntr/vntr_finder.py` | 1429 |
+| `hmm/hmm.pyx` | 991 |
+| `advntr/hmm_utils.py` | 900 |
+
+`pomegranate/` is excluded: not compiled, not maintained.
+
+### Coverage
+
+Coverage of `advntr/` + `hmm/` must never fall below `.coverage-baseline`. Target is
+**> 89 %**; the recorded starting point was 8 %, so this is a ratchet you push, not a bar
+you clear in one commit. `make coverage-ratchet` enforces the floor.
+
+Note coverage does **not** trace the Cython kernel. `hmm/hmm.pyx` is covered by the
+equivalence gates, not by line coverage — do not read a high percentage as decoder
+coverage.
+
+## Testing
+
+### The decoder must be proven byte-identical
+
+Any change to `hmm/*.pyx` or the read-selection path is guilty until proven equivalent.
+The harness compares at **decode-attempt** granularity: one record per `(read,
+orientation)` *before* selection, carrying the exact IEEE-754 bits of `logp`, the full
+Viterbi path, the exit status, and the selection decision.
+
+That granularity is not fussiness. Comparing only *selected* reads and only the *winning*
+orientation hides a broken forward decode whenever the reverse still wins, and compares
+nothing at all for rejected reads.
+
+| Tier | Scope | Cost | When |
+|---|---|---|---|
+| 1 | 2,000 stratified fixtures, committed | ~15 s | Every CI run |
+| 2 | Full corpus from VNtyper's `tests/data` | hours | Before merging a decoder change |
+| 3 | Occurrence-level, whole BAMs through `select_illumina_reads` | minutes | Any threading change |
+
+Tier 1 strata are deliberate, and **every stratum must be non-empty** — capture fails
+otherwise. The `reverse_complement_wins` stratum is the one that matters most: measured
+across 29,998 reads it fires for 77 (0.26 %), and for `example_66bf` it fires **zero**
+times in 12,608 reads. A fixture set drawn from that sample alone would go green without
+testing the branch it covers.
+
+### Two-tier rule for behaviour changes
+
+- **Tier A** — must be byte-identical. Merge on a green gate.
+- **Tier B** — may change paths, but must produce identical genotype calls on the golden
+  cohort, **and** must first demonstrate the gate actually exercises the changed branch.
+  Land behind a default-off flag.
+
+An upstream patch gets no exemption from either.
+
+## Git and PRs
+
+- Conventional commits (`feat:`, `fix:`, `perf:`, `test:`, `build:`, `docs:`, `refactor:`).
+- The commit body explains *why*, and cites the measurement or file:line that justifies it.
+- `make gate` green before opening a PR.
+- A decoder PR body must contain: pristine ms/attempt, new ms/attempt, which tiers ran,
+  how many files and attempts were compared.
+
+## Release workflow
+
+1. `make gate`
+2. Bump `advntr/__init__.py:__version__`
+3. Tag and release from `main`
+4. Bump `GIT_COMMIT` in VNtyper's `vntyper/dependencies/advntr/install_advntr.cfg`
+5. Run VNtyper's golden-cohort gate — the adVNTR cases are `a5c1_hg19_advntr`,
+   `b178_hg19_advntr`, `dfc3_hg19_advntr` at `--advntr-max-coverage 300`
+
+VNtyper pins an exact commit, so nothing reaches users until step 4.
+
+## Traps
+
+- **Visit order is semantic.** `hmm/hmm.pyx` relaxes with `> 1e-10`, not `> 0`. The DP is
+  therefore *not* an order-independent fixpoint: a chain of sub-epsilon improvements is
+  truncated differently under a different order. Neighbour order (the `sorted()` in
+  `bake()`) and FIFO push/pop order must be preserved exactly by any rewrite. This is the
+  single easiest way to silently change a genotype call.
+
+- **Never recompute `log()` for edge weights.** Copy the double already in
+  `transition_matrix`. libm's `log` is not correctly rounded and can differ in the last
+  ulp across versions, which breaks bit-equivalence for no benefit.
+
+- **Never add `-ffast-math`.** It reassociates floating point and breaks the `-inf`
+  propagation the decoder relies on for its rejection test.
+
+- **`wraparound=False` segfaults.** The code relies on negative indexing and `boundscheck`
+  is already off. Verified empirically, not theorised.
+
+- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:1133`
+  unconditionally rebuilds the model from a read length derived from `samfile.head(5)`.
+  Two consequences: `iteratively_update_model` (`:1099`) passes a refined model that is
+  silently discarded, so its refinement loop cannot converge; and the model a run used is
+  *not* the one you handed it. On the corpus BAMs the derived length is 151, giving a
+  **2565**-state model — a hand-built `read_length=150` model has **2559**. Fingerprint
+  `finder.hmm` *after* the call, never before.
+
+- **`derive_read_length` can IndexError.** It is `sorted(head(5) lengths)[3]`, so a BAM
+  whose head yields fewer than four records crashes. Mirrored in the harness rather than
+  papered over.
+
+- **`USE_TRAINED_HMMS = True` crashes.** `advntr/settings.py:9` disables it. The enhanced
+  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:112,119` would raise
+  `AttributeError`. The flag was turned off in 2018 for disk usage — a year before the
+  backend that lacks the API was written.
+
+- **`adVNTR-Filtering` is not built or installed.** `advntr/genome_analyzer.py:166` calls
+  it via `os.system` and never checks the return; the shell redirect creates an empty
+  file, so unmapped-read recruitment silently yields nothing. Affects the copy-number
+  path, not `-fs`.
+
+- **`hmm/__init__.py` calls `pyximport.install()` at import** and mutates
+  `os.environ['CFLAGS']` in-process, which leaks into every subprocess it later spawns.
+
+- **The egg is zip-safe but ships `.so` files**, so they are extracted to
+  `~/.cache/Python-Eggs` at first import. Stale after a rebuild; breaks on read-only
+  `$HOME`.
+
+- **Tied mutations sort by count alone** (`advntr/vntr_finder.py:659`) over a Python 2
+  `defaultdict`, so their order follows hash-table layout and insertion history, not read
+  order. Preserving read order does **not** by itself make tied output deterministic.
+
+- **Final-column silent states are never drained.** The main loop is
+  `for col in range(sequence_length)`, so silent states activated at `col == L` are
+  dropped; one hardcoded relaxation runs afterwards and writes a DP cell *without
+  enqueuing it*. That last detail breaks any scratch-reuse scheme that tracks only the
+  work queue.
+
+- **`recruit_read` needs the vpath, not indices.** It calls
+  `get_number_of_matches_in_vpath`, which unpacks `(idx, state)` tuples. Passing a tuple
+  of ints raises `TypeError: 'int' object is not iterable`.
+
+## Never
+
+- Add an `upstream` remote, or merge from upstream. Cherry-pick and re-gate instead.
+- Change production code to make a test pass. If a test contradicts the code, establish
+  which is right; if the code wins, skip the test with the reason written down.
+- Claim equivalence from a gate that compares only selected reads or only one orientation.
+- Land a decoder change without Tier 2, or a threading change without Tier 3.
+- Recompile `pomegranate/`.
