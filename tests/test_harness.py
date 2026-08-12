@@ -3,8 +3,11 @@
 The harness is what every later correctness claim rests on, so it gets tested before it
 is trusted.
 """
+import json
 import os
+import shutil
 import struct
+import tempfile
 import unittest
 
 import pysam
@@ -173,3 +176,90 @@ class TestExtraction(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestVerifyPreflight(unittest.TestCase):
+    """`--verify` was checked only AFTER the capture had already run.
+
+    `make tier2` captures the whole corpus and only then opens the baseline manifest --
+    which has never existed in this tree, in the working copy or in history. So every
+    invocation spent the entire capture and ended in IOError. Reproduced at 1/8 scale:
+    38.2 s of real decoding, the new manifest written, then the crash. On the full corpus
+    that is ~14 min on this kernel, and ~4.8 h on the pristine one the baseline must come
+    from.
+
+    The check costs one `os.path.isfile` and belongs before the work, not after it.
+    """
+
+    def _run_with_stubbed_capture(self, stub, argv):
+        import advntr_harness.capture as capture_module
+
+        original = capture_module.capture
+        capture_module.capture = stub
+        try:
+            return capture_module.main(argv)
+        finally:
+            capture_module.capture = original
+
+    def test_a_missing_baseline_is_refused_before_any_decoding(self):
+        calls = []
+
+        def must_not_run(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError('capture() ran despite a missing baseline manifest')
+
+        out = tempfile.mkdtemp()
+        baseline = tempfile.mkdtemp()
+        try:
+            self.assertRaises(
+                SystemExit,
+                self._run_with_stubbed_capture,
+                must_not_run,
+                ['--tier', '2', '--out', out, '--verify', baseline])
+        finally:
+            shutil.rmtree(out)
+            shutil.rmtree(baseline)
+
+        self.assertEqual(calls, [])
+
+    def test_the_message_names_the_path_it_could_not_find(self):
+        out = tempfile.mkdtemp()
+        baseline = tempfile.mkdtemp()
+        try:
+            try:
+                self._run_with_stubbed_capture(
+                    lambda *a, **k: ({}, []),
+                    ['--tier', '2', '--out', out, '--verify', baseline])
+            except SystemExit as exc:
+                message = str(exc)
+            else:
+                self.fail('a missing baseline must abort')
+        finally:
+            shutil.rmtree(out)
+            shutil.rmtree(baseline)
+
+        self.assertIn(os.path.join(baseline, 'tier2_manifest.json'), message)
+
+    def test_a_present_baseline_still_reaches_the_capture(self):
+        """The guard must refuse a missing baseline, not every baseline."""
+        # A baseline with no files at all is refused by `verify` itself, which is a
+        # separate and correct guard -- so this fixture has to be a realistic one.
+        manifest = {'global_digest': 'abc',
+                    'files': [{'source_file': 'a.bam', 'eligible_count': 1,
+                               'attempt_count': 2, 'input_digest': 'i',
+                               'output_digest': 'o', 'read_length': 151,
+                               'model_key': 'hg19@151'}]}
+        out = tempfile.mkdtemp()
+        baseline = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(baseline, 'tier2_manifest.json'), 'w') as handle:
+                json.dump(manifest, handle)
+
+            status = self._run_with_stubbed_capture(
+                lambda *a, **k: (dict(manifest), []),
+                ['--tier', '2', '--out', out, '--verify', baseline])
+        finally:
+            shutil.rmtree(out)
+            shutil.rmtree(baseline)
+
+        self.assertEqual(status, 0)

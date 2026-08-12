@@ -377,6 +377,23 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.CRITICAL)
+
+    # Preflight, because everything below is expensive and this is not. `--verify` used to
+    # be resolved only after the capture, so a missing baseline cost the whole run before
+    # anything reported it: ~14 min on this kernel for tier 2, and the pristine capture the
+    # baseline must come from is ~4.8 h. A comparison that cannot happen should not be paid
+    # for first.
+    baseline_path = None
+    if args.verify:
+        baseline_path = os.path.join(args.verify, 'tier%d_manifest.json' % args.tier)
+        if not os.path.isfile(baseline_path):
+            raise SystemExit(
+                'no baseline manifest at %s, so there is nothing to verify against. '
+                'Capture one from pristine 05fd98a (checkout, `make build`, then this same '
+                'command with --out pointing at a scratch directory and no --verify), copy '
+                'tier%d_manifest.json into %s, and re-run. Refusing to spend the capture '
+                'first.' % (baseline_path, args.tier, args.verify))
+
     manifest, retained = capture(args.tier, args.vntyper_data, args.models,
                                  collect_attempts=(args.tier == 1))
 
@@ -424,8 +441,7 @@ def main(argv=None):
         json.dump(manifest, handle, indent=2, sort_keys=True)
     sys.stderr.write('wrote %s\n' % manifest_path)
 
-    if args.verify:
-        baseline_path = os.path.join(args.verify, 'tier%d_manifest.json' % args.tier)
+    if baseline_path:
         with open(baseline_path) as handle:
             problems = verify(json.load(handle), manifest)
         if problems:
