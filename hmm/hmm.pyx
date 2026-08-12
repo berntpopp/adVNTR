@@ -395,15 +395,6 @@ cdef class Model(object):
         self.silent = silent
         self.emissions = emissions
 
-        # self.neighboring_state_indices = np.zeros((self.n_states, self.n_states), dtype=np.int)
-        # for from_state in transition_map.keys():
-        #     outgoing_states = transition_map[from_state]
-        #     for to_state in outgoing_states:
-        #         from_index = self.state_to_index[from_state]
-        #         to_index = self.state_to_index[to_state]
-        #         self.neighboring_state_indices[from_index][to_index] = 1
-
-
         # Find start and end index of repeats matcher
         # if len(self.subModels) > 1:
         #     repeat_matcher_model = self.subModels[1]
@@ -415,11 +406,17 @@ cdef class Model(object):
     def transition_matrix_view(self):
         """Read-only view of the dense transition matrix. For tests only.
 
-        `transition_matrix` is a private cdef attribute; exposing a numpy view lets the
-        CSR invariant tests prove that `nbr_logp` was COPIED from it rather than
-        recomputed with log(), without making the matrix itself writable from Python.
+        Lets the CSR invariant tests prove `nbr_logp` was COPIED from this matrix rather
+        than recomputed with log(). `writeable = False` is load-bearing, not decoration:
+        np.asarray on the cdef memoryview ALIASES the model's storage, and the decoder
+        reads these edges twice from two copies -- the main DP from `nbr_logp` (:920),
+        the hardcoded final relaxation from this matrix (:943). Measured: dropping the
+        final edge by 1.0 through a writable view moved a 151-base score from
+        -335.85084206362586 to -336.85084206362586 while `nbr_logp[9015]` stayed 0.0.
         """
-        return np.asarray(self.transition_matrix)
+        view = np.asarray(self.transition_matrix)
+        view.flags.writeable = False
+        return view
 
     def _sort_states(self):
         """

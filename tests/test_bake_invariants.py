@@ -63,6 +63,22 @@ class TestBakeInvariants(unittest.TestCase):
                     mismatches += 1
         self.assertEqual(mismatches, 0)
 
+    def test_the_dense_view_refuses_assignment(self):
+        """The docstring promises "read-only"; np.asarray on the cdef memoryview ALIASES
+        the model's storage, so without the flag the promise is false.
+
+        It is not cosmetic. The two decoder stages read different copies of the same
+        edges: the main DP reads the CSR copy (hmm.pyx:923/928) while the hardcoded
+        final relaxation reads the dense matrix (hmm.pyx:946). Measured on this model,
+        writing the final edge through a writable view moved a 151-base sequence's score
+        from -335.85084206362586 to -336.85084206362586 while nbr_logp[9015] stayed 0.0
+        -- i.e. a test could silently desynchronise the two stages of the decoder it is
+        supposed to be protecting.
+        """
+        dense = self.model.transition_matrix_view()
+        self.assertFalse(dense.flags.writeable)
+        self.assertRaises(ValueError, dense.__setitem__, (0, 0), 1.0)
+
     def test_silence_flags_match_distribution_is_none(self):
         for position, state in enumerate(self.model.states):
             self.assertEqual(bool(self.silent[position]), state.distribution is None,

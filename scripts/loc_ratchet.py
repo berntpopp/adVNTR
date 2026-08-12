@@ -14,7 +14,7 @@ NEW_FILE_LIMIT = 650
 GRANDFATHERED = {
     'advntr/plot.py': 1445,
     'advntr/vntr_finder.py': 1419,
-    'hmm/hmm.pyx': 989,
+    'hmm/hmm.pyx': 986,
     'advntr/hmm_utils.py': 900,
 }
 
