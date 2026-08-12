@@ -20,11 +20,9 @@ from advntr.sam_utils import get_reference_genome_of_alignment_file, get_related
 from advntr import settings
 from advntr.utils import is_low_quality_read
 
-if settings.USE_ENHANCED_HMM:
-    from hmm.hmm import Model
-    from hmm.base import DiscreteDistribution, State
-else:
-    from pomegranate import HiddenMarkovModel as Model
+require_enhanced_hmm(settings.USE_ENHANCED_HMM)
+from hmm.hmm import Model
+from hmm.base import DiscreteDistribution, State
 
 # from deep_recruitment import get_embedding_of_string, input_dim
 

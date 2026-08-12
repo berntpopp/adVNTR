@@ -5,12 +5,23 @@ from advntr.profile_hmm import build_profile_hmm_for_repeats, build_profile_hmm_
 from advntr.profiler import time_usage
 from advntr import settings
 
-if settings.USE_ENHANCED_HMM:
-    from hmm.hmm import Model
-    from hmm.base import DiscreteDistribution, State
-else:
-    from pomegranate import DiscreteDistribution, State
-    from pomegranate import HiddenMarkovModel as Model
+def require_enhanced_hmm(enabled):
+    """Fail early and legibly when the pomegranate backend is selected.
+
+    That backend is unsupported in this fork and is no longer compiled, so importing it
+    triggers pyximport, which attempts a build and dies inside gcc on an unrelated scipy
+    BLAS signature mismatch. Raising here turns a confusing build failure into a
+    statement of fact.
+    """
+    if not enabled:
+        raise RuntimeError(
+            'USE_ENHANCED_HMM=False selects the pomegranate backend, which is '
+            'unsupported in this fork and is not compiled. See FORK.md.')
+
+
+require_enhanced_hmm(settings.USE_ENHANCED_HMM)
+from hmm.hmm import Model
+from hmm.base import DiscreteDistribution, State
 
 from math import log
 from collections import defaultdict
