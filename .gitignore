@@ -26,3 +26,9 @@ filtering/.cproject
 filtering/.settings/
 adVNTR-Filtering
 
+
+# Planning artifacts (docs/ is the published Sphinx site)
+.planning/
+# Harness scratch output
+tests/golden/*.actual
+tests/golden/*.actual.gz
