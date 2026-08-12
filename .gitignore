@@ -37,3 +37,5 @@ tests/golden/*.actual.gz
 hmm/*.so
 hmm/*.c
 build_config.pyc
+.coverage
+.coverage-now
