@@ -16,7 +16,9 @@ build
 dist
 pomegranate/*.c
 pomegranate/*.so
-hmm/*.c
+# Cython-generated only. hmm/queue.c is a HAND-WRITTEN tracked source.
+hmm/hmm.c
+hmm/base.c
 
 .coverage
 htmlcov/
@@ -35,7 +37,6 @@ tests/golden/*.actual.gz
 
 # Build artifacts
 hmm/*.so
-hmm/*.c
+# Cython-generated only. hmm/queue.c is a HAND-WRITTEN tracked source.
 build_config.pyc
-.coverage
 .coverage-now

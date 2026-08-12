@@ -46,5 +46,6 @@ gate: no-upstream-remote loc-ratchet build test coverage-ratchet
 	@echo "gate: PASS"
 
 clean:
-	rm -f hmm/*.so hmm/*.c .coverage .coverage-now
+	# NOT hmm/*.c -- hmm/queue.c is a hand-written tracked source, not generated.
+	rm -f hmm/*.so hmm/hmm.c hmm/base.c .coverage .coverage-now
 	rm -rf build
