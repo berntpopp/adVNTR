@@ -60,6 +60,7 @@ with a demonstration that the gate actually exercises the changed branch.
 
 | Version | What changed |
 |---|---|
+| 2.0.1 | Packaging fix: `find_packages()` was shipping `advntr_harness` (the equivalence harness) and `scripts/` into the installed egg, putting development tooling on the user's path. Caught by installing in Docker and importing from outside the repo. |
 | 2.0.0 | `-t` became real: the Viterbi DP moved into a `nogil` block and the read loop is threaded. 19.6x serial, ~119x end-to-end at `-t 16`. Byte-identical decoder output. `USE_ENHANCED_HMM=False` now raises; `pomegranate/` is no longer compiled. |
 | 1.3.3 | Inherited from upstream `enhanced_hmm`. `-t` was a genuine no-op on the `genotype -fs` path. |
 
