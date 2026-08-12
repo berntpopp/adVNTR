@@ -81,8 +81,32 @@ class PendingRead(object):
 
 
 def _decode_one(model, pending):
+    """Decode both orientations, keeping only the traceback that wins.
+
+    Both log-probabilities are kept: phase 3 still makes the orientation decision, and it
+    makes it from those two floats alone. What is dropped is the LOSING traceback, at the
+    first moment the comparison that settles it is possible.
+
+    Retaining both is what made peak memory scale with locus coverage. Every eligible read
+    held two complete `(int, State)` lists of ~156 entries from the moment it finished
+    decoding until `select_illumina_reads` returned: measured at `-t 16`, 16,678,600
+    retained entries and 1.46 GB on the 50,619-read BAM, against 442 MB for pristine on the
+    same input.
+
+    Pristine was not O(1) either -- it retains the winning vpath of every SELECTED read for
+    the life of the return value, which `find_frameshift_from_selected_reads` and
+    `iteratively_update_model` then consume. So this is not a new retention policy; it is
+    the pristine one, restored.
+
+    The test below is exactly phase 3's (`vntr_finder.py:1141`), so the survivor is always
+    the traceback phase 3 goes on to select -- including the tie, where `<` keeps forward.
+    """
     pending.logp, pending.vpath = model.viterbi(pending.sequence)
     pending.rev_logp, pending.rev_vpath = model.viterbi(pending.reverse)
+    if pending.logp < pending.rev_logp:
+        pending.vpath = None
+    else:
+        pending.rev_vpath = None
 
 
 def decode_serially(model, pending_reads):
