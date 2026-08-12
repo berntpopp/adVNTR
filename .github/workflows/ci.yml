@@ -58,16 +58,17 @@ jobs:
       - name: Build the extension
         run: python setup_hmm.py build_ext --inplace
 
-      # Guards the claim the whole rewrite rests on. If the DP stops releasing the GIL,
-      # every threading number becomes fiction and nothing else here would notice.
-      - name: Assert the DP still releases the GIL
-        run: |
-          count=$(grep -c "Py_UNBLOCK_THREADS\|PyEval_SaveThread" hmm/hmm.c || true)
-          echo "GIL-release sites in generated C: $count"
-          if [ "$count" -lt 1 ]; then
-            echo "::error::the Viterbi DP no longer releases the GIL"
-            exit 1
-          fi
+      # Guards the claim the whole rewrite rests on. If the DP stops running without the
+      # GIL, every threading number becomes fiction and nothing else here would notice:
+      # the outputs are identical either way, the read-selection threading test drives a
+      # pure-Python stub model, and no test asserts wall-clock or scaling.
+      #
+      # This used to be `grep -c Py_UNBLOCK_THREADS hmm/hmm.c` with a >= 1 threshold, which
+      # counted releases anywhere in a 1.7 MB generated file. Measured on a build where the
+      # DP holds the GIL and one unrelated function releases it, that grep reports GREEN;
+      # the script reports the DP call outside any released region and exits 1.
+      - name: Assert the Viterbi DP still runs without the GIL
+        run: python scripts/assert_gil_release.py hmm/hmm.c
 
       - name: Unit suite, Tier 1 equivalence gate, characterization
         run: python -m unittest discover tests -v
