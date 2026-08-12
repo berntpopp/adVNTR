@@ -23,27 +23,44 @@ reported result. Production emits in read order; so does this.
 import logging
 import threading
 
-#: Per-read record handed from phase 1 to phases 2 and 3.
+#: What phase 1 decided about a read, before any decoding.
 #:
-#: `reject_before_decode` is a log message for reads the filters dropped. They are kept
-#: in the list rather than discarded so phase 3 can emit their messages at the right
-#: point in read order, reproducing production's interleaving exactly.
-_FIELDS = ('sequence', 'reverse', 'mapq', 'reference_start', 'query_name',
-           'is_low_quality', 'reject_before_decode')
+#: Every read the fetch loop saw gets a record, including the ones it dropped, so phase 3
+#: can emit their log lines at the right point in read order. Production logs during
+#: iteration, i.e. in read order; replaying in read order reproduces that exactly.
+DUPLICATE = 'duplicate'      # unmapped or flagged duplicate -- logged, contributes no bp
+TOO_SHORT = 'too_short'      # below MIN_READ_LENGTH -- logged, contributes no bp
+OUT_OF_SPAN = 'out_of_span'  # fails the positional test -- silent, contributes no bp
+HAS_N = 'has_n'              # spans but contains N -- silent, DOES contribute bp
+DECODE = 'decode'            # the only outcome that reaches the decoder
 
 
 class PendingRead(object):
-    __slots__ = _FIELDS + ('logp', 'vpath', 'rev_logp', 'rev_vpath')
+    """One read the fetch loop saw.
 
-    def __init__(self, sequence=None, reverse=None, mapq=None, reference_start=None,
-                 query_name=None, is_low_quality=False, reject_before_decode=None):
+    `bp` is the read's contribution to `vntr_bp_in_mapped_reads`. It is carried rather
+    than recomputed because the original accumulates it *after* the decode-time
+    `continue` statements, so a read rejected for low likelihood or low quality
+    contributes nothing while a read containing N contributes normally. That asymmetry
+    is easy to lose in a restructure and only shows up in a log line.
+    """
+
+    __slots__ = ('outcome', 'log_message', 'bp', 'sequence', 'reverse', 'mapq',
+                 'reference_start', 'query_name', 'is_low_quality',
+                 'logp', 'vpath', 'rev_logp', 'rev_vpath')
+
+    def __init__(self, outcome=DECODE, log_message=None, bp=0, sequence=None,
+                 reverse=None, mapq=None, reference_start=None, query_name=None,
+                 is_low_quality=False):
+        self.outcome = outcome
+        self.log_message = log_message
+        self.bp = bp
         self.sequence = sequence
         self.reverse = reverse
         self.mapq = mapq
         self.reference_start = reference_start
         self.query_name = query_name
         self.is_low_quality = is_low_quality
-        self.reject_before_decode = reject_before_decode
         self.logp = None
         self.vpath = None
         self.rev_logp = None
@@ -51,7 +68,16 @@ class PendingRead(object):
 
     @property
     def needs_decoding(self):
-        return self.reject_before_decode is None
+        return self.outcome == DECODE
+
+    # Retained so older callers and tests that set `reject_before_decode` keep working.
+    def _get_reject(self):
+        return None if self.outcome == DECODE else self.outcome
+
+    def _set_reject(self, value):
+        self.outcome = DECODE if value is None else TOO_SHORT
+
+    reject_before_decode = property(_get_reject, _set_reject)
 
 
 def _decode_one(model, pending):

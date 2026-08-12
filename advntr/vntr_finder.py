@@ -17,6 +17,7 @@ from advntr.hmm_utils import *
 from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
 from advntr.sam_utils import get_reference_genome_of_alignment_file, get_related_reads_and_read_count_in_samfile
+from advntr import read_selection
 from advntr import settings
 from advntr.utils import is_low_quality_read
 
@@ -135,14 +136,6 @@ class VNTRFinder:
         queries = set(queries)
         return queries
 
-    @staticmethod
-    def add_hmm_score_to_list(sema, hmm, read, result_scores):
-        logp, vpath = hmm.viterbi(str(read.seq))
-        rev_logp, rev_vpath = hmm.viterbi(str(Seq(str(read.seq)).reverse_complement()))
-        if logp < rev_logp:
-            logp = rev_logp
-        result_scores.append(logp)
-        sema.release()
 
     def is_true_read(self, read):
         read_start = read.reference_start
@@ -167,49 +160,6 @@ class VNTRFinder:
             return True
         return False
 
-    def process_unmapped_read_with_dnn(self, read_segment, hmm, recruitment_score, vntr_bp_in_unmapped_reads,
-                                       selected_reads, compute_reverse, dnn_model):
-        logging.info('process unmapped read with DNN')
-        if read_segment.count('N') <= 0:
-            sequence = read_segment.upper()
-            forward_dnn_read = False
-            reverse_dnn_read = False
-
-            logp = 0
-            vpath = []
-            rev_logp = 0
-            rev_vpath = []
-            embedding = get_embedding_of_string(sequence)
-            selected = dnn_model.predict(numpy.array([embedding]), batch_size=1)[0]
-            if selected[0] > selected[1]:
-                logging.info('%s and %s' % (selected[0], selected[1]))
-                forward_dnn_read = True
-            if compute_reverse:
-                reverse_sequence = str(Seq(sequence).reverse_complement())
-                embedding = get_embedding_of_string(reverse_sequence)
-                selected = dnn_model.predict(numpy.array([embedding]), batch_size=1)[0]
-                if selected[0] > selected[1]:
-                    reverse_dnn_read = True
-
-            if forward_dnn_read or reverse_dnn_read:
-                logging.info('computing HMM viterbi')
-                if forward_dnn_read:
-                    logp, vpath = hmm.viterbi(sequence)
-                if reverse_dnn_read:
-                    rev_logp, rev_vpath = hmm.viterbi(reverse_sequence)
-                    if logp < rev_logp:
-                        logging.info('using reversed read')
-                        sequence = reverse_sequence
-                        logp = rev_logp
-                        vpath = rev_vpath
-
-                logging.info('this is a VNTR read')
-                repeat_bps = get_number_of_repeat_bp_matches_in_vpath(vpath)
-                if self.recruit_read(logp, vpath, recruitment_score, len(sequence)):
-                    if repeat_bps > self.min_repeat_bp_to_count_repeats:
-                        vntr_bp_in_unmapped_reads.value += repeat_bps
-                    if repeat_bps > self.min_repeat_bp_to_add_read:
-                        selected_reads.append(SelectedRead(sequence, logp, vpath))
 
     def process_unmapped_read(self, sema, read_segment, hmm, recruitment_score, vntr_bp_in_unmapped_reads,
                               selected_reads, compute_reverse=True):
@@ -1131,35 +1081,75 @@ class VNTRFinder:
         hmm = self.get_vntr_matcher_hmm(read_length=read_length)
         self.hmm = hmm
 
+        # ---- Phase 1: serial, pysam. Filter and materialise; the handle is not
+        # touched again afterwards. Log lines are deferred to phase 3 so they stay in
+        # read order regardless of how the decoding is scheduled.
+        pending_reads = []
         for read in samfile.fetch(chromosome, vntr_start, vntr_end):
             if read.is_unmapped or read.is_duplicate:
-                logging.debug('Rejected duplicated read')
+                pending_reads.append(read_selection.PendingRead(
+                    outcome=read_selection.DUPLICATE,
+                    log_message='Rejected duplicated read'))
                 continue
             if len(read.seq) < MIN_READ_LENGTH:
-                logging.debug('Rejected Read, short length: %s' % read.seq)
+                pending_reads.append(read_selection.PendingRead(
+                    outcome=read_selection.TOO_SHORT,
+                    log_message='Rejected Read, short length: %s' % read.seq))
                 continue
             read_end = read.reference_end if read.reference_end else read.reference_start + len(read.seq)
-            if vntr_start - read_length < read.reference_start < vntr_end or vntr_start < read_end < vntr_end:
-                if read.seq.count('N') <= 0:
-                    sequence = str(read.seq).upper()
-                    logp, vpath = hmm.viterbi(sequence)
-                    rev_logp, rev_vpath = hmm.viterbi(str(Seq(read.seq).reverse_complement()).upper())
-                    if logp < rev_logp:
-                        sequence = str(Seq(read.seq).reverse_complement()).upper()
-                        logp = rev_logp
-                        vpath = rev_vpath
-                    length = len(sequence)
-                    if logp == -numpy.inf:
-                        logging.debug('Rejected Read, low likelihood: %s' % sequence)
-                        continue
-                    if is_low_quality_read(read) and not self.recruit_read(logp, vpath, recruitment_score, length):
-                        logging.debug('Rejected Read, low quality: %s' % sequence)
-                        continue
-                    selected_reads.append(SelectedRead(sequence, logp, vpath, read.mapq, read.reference_start,
-                                                       read.query_name))
-                end = min(read_end, vntr_end)
-                start = max(read.reference_start, vntr_start)
-                vntr_bp_in_mapped_reads += end - start
+            if not (vntr_start - read_length < read.reference_start < vntr_end
+                    or vntr_start < read_end < vntr_end):
+                pending_reads.append(read_selection.PendingRead(
+                    outcome=read_selection.OUT_OF_SPAN))
+                continue
+            bp = min(read_end, vntr_end) - max(read.reference_start, vntr_start)
+            if read.seq.count('N') > 0:
+                pending_reads.append(read_selection.PendingRead(
+                    outcome=read_selection.HAS_N, bp=bp))
+                continue
+            pending_reads.append(read_selection.PendingRead(
+                outcome=read_selection.DECODE, bp=bp,
+                sequence=str(read.seq).upper(),
+                reverse=str(Seq(read.seq).reverse_complement()).upper(),
+                mapq=read.mapq, reference_start=read.reference_start,
+                query_name=read.query_name,
+                is_low_quality=is_low_quality_read(read)))
+
+        # ---- Phase 2: the only parallel part. `Model.viterbi` assigns nothing to
+        # `self`, so one baked model is shared read-only and every DP buffer is a
+        # per-call local; the DP releases the GIL, which is what makes this worth
+        # anything. Snapshot the thread count so a concurrent change to the global
+        # cannot alter it midway.
+        n_threads = read_selection.resolve_thread_count(settings.CORES)
+        read_selection.decode_pending(hmm, pending_reads, n_threads)
+
+        # ---- Phase 3: serial, in original fetch order.
+        for pending in pending_reads:
+            if pending.outcome == read_selection.DUPLICATE:
+                logging.debug(pending.log_message)
+                continue
+            if pending.outcome == read_selection.TOO_SHORT:
+                logging.debug(pending.log_message)
+                continue
+            if pending.outcome == read_selection.OUT_OF_SPAN:
+                continue
+            if pending.outcome == read_selection.HAS_N:
+                vntr_bp_in_mapped_reads += pending.bp
+                continue
+
+            sequence, logp, vpath = pending.sequence, pending.logp, pending.vpath
+            if logp < pending.rev_logp:
+                sequence, logp, vpath = pending.reverse, pending.rev_logp, pending.rev_vpath
+            length = len(sequence)
+            if logp == -numpy.inf:
+                logging.debug('Rejected Read, low likelihood: %s' % sequence)
+                continue
+            if pending.is_low_quality and not self.recruit_read(logp, vpath, recruitment_score, length):
+                logging.debug('Rejected Read, low quality: %s' % sequence)
+                continue
+            selected_reads.append(SelectedRead(sequence, logp, vpath, pending.mapq,
+                                               pending.reference_start, pending.query_name))
+            vntr_bp_in_mapped_reads += pending.bp
         logging.debug('vntr base pairs in mapped reads: %s' % vntr_bp_in_mapped_reads)
 
         vntr_bp_in_unmapped_reads = Value('d', 0.0)

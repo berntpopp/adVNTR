@@ -63,15 +63,11 @@ class TestTier3Occurrence(unittest.TestCase):
 class TestTier3ThreadInvariance(unittest.TestCase):
     """Every thread count must return the identical ordered selection.
 
-    Skipped while `settings.CORES` is still inert on this path -- running five identical
-    single-threaded passes would burn ~15 minutes proving nothing. It becomes meaningful
-    the moment the read loop honours CORES, and `test_threading_is_actually_wired`
-    below is what flips it on.
+    Order matters as much as content: `hmm_alignment.generate_aln` parses an unframed
+    DEBUG stream, and tied mutations are sorted by count alone, so a permuted selection
+    can change the reported result without changing any score.
     """
 
-    @unittest.skipUnless(os.environ.get('ADVNTR_THREADED') == '1',
-                         'read loop does not honour settings.CORES yet; '
-                         'set ADVNTR_THREADED=1 once it does')
     def test_every_thread_count_returns_the_same_ordered_selection(self):
         finder, _reference = build_finder(DB)
         reference = selection_evidence(finder, BAM, threads=1)
