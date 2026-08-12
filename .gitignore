@@ -32,3 +32,8 @@ adVNTR-Filtering
 # Harness scratch output
 tests/golden/*.actual
 tests/golden/*.actual.gz
+
+# Build artifacts
+hmm/*.so
+hmm/*.c
+build_config.pyc

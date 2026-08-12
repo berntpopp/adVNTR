@@ -1,10 +1,14 @@
-from setuptools import setup
-from distutils.core import setup
-from Cython.Build import cythonize
+# setuptools MUST be imported before Cython.Build. Cython picks which Extension base
+# class to emit depending on whether setuptools is already in sys.modules; import it
+# second and cythonize() returns distutils Extensions that setuptools' setup() then
+# rejects with "each element of 'ext_modules' option must be an Extension instance".
+from setuptools import find_packages, setup  # isort: skip
+
 import numpy
+from Cython.Build import cythonize
 
 from advntr import __version__
-from setuptools import setup, find_packages
+from build_config import CYTHON_DIRECTIVES, EXTENSION_SOURCES
 
 setup(name='advntr',
       version=__version__,
@@ -12,17 +16,20 @@ setup(name='advntr',
       author='Mehrdad Bakhtiari',
       author_email='mbakhtia@ucsd.edu',
       license='BSD-3-Clause',
-      url='https://github.com/mehrdadbakhtiari/adVNTR',
+      url='https://github.com/berntpopp/adVNTR',
       test_suite='tests',
-      # packages=['advntr', 'pomegranate'],
-      packages=find_packages(),
-      package_dir={'advntr': 'advntr', 'advntr.pomegranate': 'pomegranate'},
-      install_requires=['networkx==1.11', 'scipy', 'biopython', 'cython', 'scikit-learn'],
+      packages=find_packages(exclude=['tests', 'tests.*', 'pomegranate', 'pomegranate.*']),
+      package_dir={'advntr': 'advntr'},
+      install_requires=['scipy', 'biopython', 'cython', 'scikit-learn'],
       provides=["advntr"],
       entry_points={
             'console_scripts': ['advntr=advntr.__main__:main']
       },
-      ext_modules=cythonize(["pomegranate/*.pyx", "hmm/*.pyx"]),
+      ext_modules=cythonize(
+            EXTENSION_SOURCES,
+            compiler_directives=CYTHON_DIRECTIVES,
+            nthreads=4,
+      ),
       include_dirs=[numpy.get_include()],
       classifiers=["Environment :: Console",
                    "Intended Audience :: Developers",
@@ -30,6 +37,5 @@ setup(name='advntr',
                    "Operating System :: Unix",
                    "Programming Language :: Python",
                    "Programming Language :: Python :: 2",
-                   "Programming Language :: Python :: 3",
                    "Topic :: Scientific/Engineering :: Bio-Informatics"],
       )
