@@ -6,6 +6,7 @@ predicate below cites the production line it mirrors.
 """
 import pysam
 
+from advntr import settings
 from advntr.utils import is_low_quality_read
 
 
@@ -13,9 +14,14 @@ def resolve_contig(samfile, chromosome):
     """Return the contig name this BAM uses for `chromosome`, or None.
 
     Handles UCSC ('chr1') and Ensembl ('1') naming. Returns None for RefSeq accessions
-    ('NC_000001.11'): adVNTR cannot fetch those, and 13 files in the corpus are in that
-    state and legitimately yield zero reads. Callers must treat None as "no data here",
-    not as an error, but must also not let it pass silently as a matching empty digest.
+    ('NC_000001.11'); 14 files in the corpus are in that state.
+
+    Note this is NOT what production does. Production derives the contig via
+    `get_reference_genome_of_alignment_file` (advntr/sam_utils.py:32-39), which returns
+    'HG19'/'HG38' and yields chromosome '1' -- and `samfile.fetch('1', ...)` then raises
+    `ValueError: invalid contig` on those files. So production *crashes* where this
+    returns None. Skipping is the useful behaviour for a corpus sweep, but a caller must
+    not read the resulting empty digest as "these reads decoded identically".
     """
     references = set(samfile.references)
     if chromosome in references:
@@ -65,7 +71,12 @@ def eligible_reads(alignment_path, reference_vntr, read_length=None,
         if read_length is None:
             read_length = derive_read_length(samfile)
         if min_read_length is None:
-            min_read_length = int(read_length * 0.9)
+            # advntr/vntr_finder.py:1126-1127 -- settings.MIN_READ_LENGTH, set from
+            # --min_read_length, overrides the derived value when present.
+            if settings.MIN_READ_LENGTH is not None:
+                min_read_length = settings.MIN_READ_LENGTH
+            else:
+                min_read_length = int(read_length * 0.9)
 
         ordinal = 0
         for read in samfile.fetch(contig, vntr_start, vntr_end):

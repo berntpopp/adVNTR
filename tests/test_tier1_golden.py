@@ -13,7 +13,8 @@ import json
 import os
 import unittest
 
-from advntr_harness.capture import _ModelCache, canonical_fixture_rows
+from advntr_harness.capture import (_ModelCache, canonical_fixture_rows,
+                                    read_fixture_file)
 from advntr_harness.fingerprint import comparable_fingerprint
 from advntr_harness.strata import STRATUM_NAMES
 
@@ -33,8 +34,8 @@ has_fixtures = unittest.skipUnless(
 class TestTier1Golden(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with gzip.open(READS) as handle:
-            cls.sequences = handle.read().split('\n')
+        cls.fixtures = read_fixture_file(READS)
+        cls.sequences = [sequence for _key, sequence in cls.fixtures]
         with gzip.open(EXPECTED) as handle:
             cls.expected = handle.read().split('\n')
         with open(MANIFEST) as handle:
@@ -59,16 +60,24 @@ class TestTier1Golden(unittest.TestCase):
         exactly zero in example_66bf -- so its presence here is not automatic."""
         self.assertGreater(self.manifest['strata']['reverse_complement_wins'], 0)
 
-    def test_model_is_the_one_the_baseline_used(self):
+    def test_every_fixture_model_matches_the_baseline(self):
         cache = _ModelCache(MODELS)
-        _model, fingerprint, _score = cache.get('hg19', 151)
-        self.assertEqual(comparable_fingerprint(fingerprint),
-                         comparable_fingerprint(self.manifest['fixture_model']))
+        for model_key, expected in self.manifest['fixture_models'].items():
+            assembly, read_length = model_key.split('@')
+            _model, fingerprint, _score = cache.get(assembly, int(read_length))
+            self.assertEqual(comparable_fingerprint(fingerprint),
+                             comparable_fingerprint(expected),
+                             'model %s changed' % model_key)
+
+    def test_fixtures_span_more_than_one_model_context(self):
+        """Read length is derived per file and the corpus disagrees: 7a61/b178 give
+        151 (2565 states), a5c1 gives 149 (2553). Binding fixtures to a single model
+        would mislabel most of the reverse-complement stratum."""
+        self.assertGreater(len(set(key for key, _ in self.fixtures)), 1)
 
     def test_decoding_is_byte_identical_to_the_baseline(self):
         cache = _ModelCache(MODELS)
-        model, _fingerprint, recruitment_score = cache.get('hg19', 151)
-        actual = canonical_fixture_rows(model, recruitment_score, self.sequences)
+        actual = canonical_fixture_rows(cache, self.fixtures)
 
         self.assertEqual(len(actual), len(self.expected))
         for index, (got, want) in enumerate(zip(actual, self.expected)):
