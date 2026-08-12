@@ -1,4 +1,16 @@
 {
+  "baseline_kind": "post-rewrite regression baseline", 
   "count": 1047, 
-  "digest": "3d4d3ec612b573d171d364f1469103c0175f29250ec17d9639527331bd502f31"
+  "digest": "3d4d3ec612b573d171d364f1469103c0175f29250ec17d9639527331bd502f31", 
+  "kernel_provenance": {
+    "hmm/base.pxd": "6aca8f9953f89e93", 
+    "hmm/base.pyx": "2ab32120313301ab", 
+    "hmm/cqueue.pxd": "4df79cca45d95b34", 
+    "hmm/hmm.pyx": "753f559e87fe47da", 
+    "hmm/queue.c": "4bd388222b50c954", 
+    "loaded_so": "4152f8cc5c5a18af"
+  }, 
+  "model_states": 2565, 
+  "note": "Captured on the threaded read loop, not on pristine 05fd98a. It pins the returned SelectedRead stream against later read-loop changes; it does not prove equivalence with the pristine implementation. Tier 1 is the pristine gate -- see tests/golden/tier1_manifest.json, whose kernel_provenance names the 05fd98a kernel.", 
+  "source_file": "example_7a61_hg19_subset.bam"
 }

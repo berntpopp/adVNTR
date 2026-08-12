@@ -84,3 +84,59 @@ class TestTier3ThreadInvariance(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+TIER1_MANIFEST = os.path.join(GOLDEN, 'tier1_manifest.json')
+
+#: hmm/hmm.pyx at 05fd98a. Tier 1's baseline records this, which is what makes it a
+#: pristine gate rather than a self-comparison.
+PRISTINE_KERNEL_DIGEST = 'e87fabf5e8633235'
+
+
+class TestTheBaselineSaysWhatItIs(unittest.TestCase):
+    """The Tier 3 manifest was `{"count": ..., "digest": ...}` and nothing else.
+
+    It was added by 82b1c2b -- the threading commit itself -- so nothing in the tree
+    established which kernel produced it, and a reader could reasonably take it for a
+    pristine baseline like Tier 1's. It is not one. Recording that is the difference
+    between a gate and a gate believed to be stronger than it is.
+
+    These read files only, so they run without the corpus.
+    """
+
+    @has_baseline
+    def test_the_baseline_records_the_kernel_that_produced_it(self):
+        with open(MANIFEST) as handle:
+            baseline = json.load(handle)
+
+        self.assertIn('kernel_provenance', baseline)
+        self.assertIn('hmm/hmm.pyx', baseline['kernel_provenance'])
+        self.assertNotEqual(baseline['kernel_provenance']['hmm/hmm.pyx'], 'absent')
+
+    @has_baseline
+    def test_the_baseline_does_not_claim_to_be_pristine(self):
+        with open(MANIFEST) as handle:
+            baseline = json.load(handle)
+
+        self.assertEqual(baseline['baseline_kind'], 'post-rewrite regression baseline')
+        self.assertNotEqual(baseline['kernel_provenance']['hmm/hmm.pyx'],
+                            PRISTINE_KERNEL_DIGEST)
+        self.assertIn('Tier 1 is the pristine gate', baseline['note'])
+
+    @has_baseline
+    def test_the_baseline_names_the_file_it_was_captured_from(self):
+        """A count and a digest mean nothing without the input that produced them."""
+        with open(MANIFEST) as handle:
+            baseline = json.load(handle)
+
+        self.assertEqual(baseline['source_file'], os.path.basename(BAM))
+        self.assertEqual(baseline['model_states'], 2565)
+
+    @unittest.skipUnless(os.path.isfile(TIER1_MANIFEST), 'Tier 1 baseline not present')
+    def test_tier_one_by_contrast_does_record_the_pristine_kernel(self):
+        """The contrast is the point: this is what a pristine baseline looks like, and it
+        is why the equivalence claim rests on Tier 1 and not on this tier."""
+        with open(TIER1_MANIFEST) as handle:
+            tier1 = json.load(handle)
+
+        self.assertEqual(tier1['kernel_provenance']['hmm/hmm.pyx'], PRISTINE_KERNEL_DIGEST)
