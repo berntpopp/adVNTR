@@ -55,3 +55,13 @@ Upstream changes that alter decoder output are not accepted on the strength of
 being upstream. They go through the same two-tier gate as anything else: either
 byte-identical decoder output, or identical genotype calls on the golden cohort
 with a demonstration that the gate actually exercises the changed branch.
+
+## Releases
+
+| Version | What changed |
+|---|---|
+| 2.0.0 | `-t` became real: the Viterbi DP moved into a `nogil` block and the read loop is threaded. 19.6x serial, ~119x end-to-end at `-t 16`. Byte-identical decoder output. `USE_ENHANCED_HMM=False` now raises; `pomegranate/` is no longer compiled. |
+| 1.3.3 | Inherited from upstream `enhanced_hmm`. `-t` was a genuine no-op on the `genotype -fs` path. |
+
+The major bump is not cosmetic: `-t N` previously set `settings.CORES`, which nothing on
+this path read. Anyone relying on `-t` being inert now gets real threads.
