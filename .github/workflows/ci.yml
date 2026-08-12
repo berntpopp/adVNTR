@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A superseded run tells you nothing; cancel it rather than pay for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   gate:
@@ -16,34 +22,76 @@ jobs:
         with:
           fetch-depth: 0
 
-      # This is a hard fork (see FORK.md). Fail loudly if an upstream remote reappears.
+      # This is a hard fork (see FORK.md). Fail loudly if an upstream remote reappears,
+      # before spending five minutes on a conda solve.
       - name: Refuse an upstream remote
+        shell: bash
         run: |
           if git remote | grep -qx upstream; then
-            echo "ERROR: an 'upstream' remote exists. This is a hard fork; see FORK.md."
+            echo "::error::an 'upstream' remote exists. This is a hard fork; see FORK.md."
             exit 1
           fi
+
+      # Cheap and needs no toolchain, so it runs before the environment is built.
+      - name: File-size ratchet
+        shell: bash
+        run: python3 scripts/loc_ratchet.py
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
           python-version: '2.7'
-          channels: conda-forge,bioconda,defaults
+          channels: conda-forge,bioconda
           auto-activate-base: false
           activate-environment: envadvntr
 
+      - name: Cache conda packages
+        uses: actions/cache@v4
+        with:
+          path: ~/conda_pkgs_dir
+          key: conda-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
       - name: Install dependencies
         run: |
-          conda install -y "cython=0.29.*" "numpy=1.16.*" scipy biopython pysam muscle scikit-learn "coverage<5"
+          conda install -y "cython=0.29.*" "numpy=1.16.*" scipy biopython pysam \
+                           muscle scikit-learn "coverage<5"
 
       - name: Build the extension
         run: python setup_hmm.py build_ext --inplace
 
-      # Ordered so a size or import regression fails before the slow steps.
-      - name: File-size ratchet
-        run: python scripts/loc_ratchet.py
+      # Guards the claim the whole rewrite rests on. If the DP stops releasing the GIL,
+      # every threading number becomes fiction and nothing else here would notice.
+      - name: Assert the DP still releases the GIL
+        run: |
+          count=$(grep -c "Py_UNBLOCK_THREADS\|PyEval_SaveThread" hmm/hmm.c || true)
+          echo "GIL-release sites in generated C: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::the Viterbi DP no longer releases the GIL"
+            exit 1
+          fi
 
-      - name: Unit suite and Tier 1 equivalence gate
-        run: python -m unittest discover tests
+      - name: Unit suite, Tier 1 equivalence gate, characterization
+        run: python -m unittest discover tests -v
 
       - name: Coverage ratchet
         run: make coverage-ratchet
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: .coverage-now
+          if-no-files-found: ignore
+
+  # Tier 2 needs VNtyper's 1.8 GB corpus, so it cannot run on a hosted runner.
+  # Kept as a documented manual entry point rather than a job that silently never runs.
+  tier2-note:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain how to run the full-corpus gate
+        run: |
+          echo "Tier 2 requires VNtyper's tests/data and runs for hours."
+          echo "Run it on a machine that has the corpus:"
+          echo "  make tier2"
+          echo "It verifies per-file input attestation, model context, and output digest."
