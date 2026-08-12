@@ -174,8 +174,6 @@ class TestExtraction(unittest.TestCase):
             samfile.close()
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestVerifyPreflight(unittest.TestCase):
@@ -263,3 +261,7 @@ class TestVerifyPreflight(unittest.TestCase):
             shutil.rmtree(baseline)
 
         self.assertEqual(status, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

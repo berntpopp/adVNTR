@@ -10,7 +10,7 @@ import os
 import unittest
 
 from advntr_harness.capture import build_finder
-from advntr_harness.tier3 import selection_digest, selection_evidence
+from advntr_harness.tier3 import BASELINE_MANIFEST_KEYS, selection_digest, selection_evidence
 
 DATA = '/home/bernt-popp/development/VNtyper/tests/data'
 GOLDEN = os.path.join(os.path.dirname(__file__), 'golden')
@@ -82,8 +82,6 @@ class TestTier3ThreadInvariance(unittest.TestCase):
                              'selection diverged at -t %d' % threads)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 TIER1_MANIFEST = os.path.join(GOLDEN, 'tier1_manifest.json')
@@ -132,6 +130,16 @@ class TestTheBaselineSaysWhatItIs(unittest.TestCase):
         self.assertEqual(baseline['source_file'], os.path.basename(BAM))
         self.assertEqual(baseline['model_states'], 2565)
 
+    @has_baseline
+    def test_the_shipped_manifest_carries_exactly_what_its_producer_writes(self):
+        """`baseline_manifest` is the only record of how this artefact was made, and until
+        it had a caller nothing noticed if the two drifted. Key-set equality is cheap and
+        needs no corpus; the values are checked by the comparison test above."""
+        with open(MANIFEST) as handle:
+            baseline = json.load(handle)
+
+        self.assertEqual(sorted(baseline), sorted(BASELINE_MANIFEST_KEYS))
+
     @unittest.skipUnless(os.path.isfile(TIER1_MANIFEST), 'Tier 1 baseline not present')
     def test_tier_one_by_contrast_does_record_the_pristine_kernel(self):
         """The contrast is the point: this is what a pristine baseline looks like, and it
@@ -140,3 +148,7 @@ class TestTheBaselineSaysWhatItIs(unittest.TestCase):
             tier1 = json.load(handle)
 
         self.assertEqual(tier1['kernel_provenance']['hmm/hmm.pyx'], PRISTINE_KERNEL_DIGEST)
+
+
+if __name__ == '__main__':
+    unittest.main()

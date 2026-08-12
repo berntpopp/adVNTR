@@ -10,6 +10,7 @@ So this tier calls the production function itself and digests what it returned, 
 """
 import hashlib
 import os
+import sys
 
 from advntr import settings
 from advntr_harness.oracle import EMPTY_STREAM_SENTINEL, logp_to_hex
@@ -76,8 +77,8 @@ def selection_evidence(finder, alignment_path, threads=None):
       protected structurally -- all logging is deferred to the serial assembly phase, in
       fetch order -- rather than by this gate;
     * `vntr_bp_in_mapped_reads`, which is a local consumed only by a `logging.debug`;
-    * peak memory. The loop retains both orientations' tracebacks for every eligible
-      read, which this cannot notice at any thread count;
+    * peak memory. The loop retains one traceback per eligible read -- more than pristine,
+      which keeps one per selected read -- and this cannot notice at any thread count;
     * exception behaviour, which `tests/test_read_selection.py` covers instead.
 
     Args:
@@ -118,6 +119,15 @@ BASELINE_NOTE = (
 )
 
 
+#: Exactly what `tests/golden/tier3_manifest.json` carries.
+#:
+#: Named rather than implicit so the shipped artefact and the function that produces it
+#: cannot drift apart: `tests/test_tier3_occurrence.py` asserts the file's key set against
+#: this tuple, which costs nothing and does not need the corpus.
+BASELINE_MANIFEST_KEYS = ('baseline_kind', 'count', 'digest', 'kernel_provenance',
+                          'model_states', 'note', 'source_file')
+
+
 def baseline_manifest(finder, alignment_path):
     """Build the Tier 3 baseline, stamped with what produced it.
 
@@ -126,9 +136,11 @@ def baseline_manifest(finder, alignment_path):
         alignment_path: The BAM the baseline is captured from.
 
     Returns:
-        dict: The manifest.
+        dict: The manifest, keyed by :data:`BASELINE_MANIFEST_KEYS`.
     """
-    from advntr_harness.capture import kernel_provenance  # circular at module scope
+    # Deferred, not circular -- capture.py never imports this module. It pulls in pysam
+    # and Bio, which the rest of tier3 does not need.
+    from advntr_harness.capture import kernel_provenance
 
     evidence = selection_evidence(finder, alignment_path)
     return {
@@ -140,3 +152,41 @@ def baseline_manifest(finder, alignment_path):
         'note': BASELINE_NOTE,
         'kernel_provenance': kernel_provenance(),
     }
+
+
+def main(argv=None):
+    """Recapture the Tier 3 baseline and write it.
+
+    This exists so the manifest has a committed producer. Without one, the only record of
+    how `tests/golden/tier3_manifest.json` was made is a shell snippet in someone's
+    history, which is the failure `golden_cohort_gate.py` was written to end on the
+    VNtyper side.
+
+    Args:
+        argv: Arguments without the program name; defaults to `sys.argv[1:]`.
+
+    Returns:
+        int: 0 on success.
+    """
+    import argparse  # noqa: PLC0415 - only needed when run as a script
+    import json
+
+    from advntr_harness.capture import build_finder
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.path.join('tests', 'golden', 'models', 'hg19_muc1.db'))
+    parser.add_argument('--bam', required=True)
+    parser.add_argument('--out', default=os.path.join('tests', 'golden', 'tier3_manifest.json'))
+    args = parser.parse_args(argv)
+
+    finder, _reference = build_finder(args.db)
+    manifest = baseline_manifest(finder, args.bam)
+    with open(args.out, 'w') as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+    sys.stderr.write('wrote %s (count=%d digest=%s)\n'
+                     % (args.out, manifest['count'], manifest['digest'][:16]))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

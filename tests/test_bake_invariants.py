@@ -68,8 +68,8 @@ class TestBakeInvariants(unittest.TestCase):
         the model's storage, so without the flag the promise is false.
 
         It is not cosmetic. The two decoder stages read different copies of the same
-        edges: the main DP reads the CSR copy (hmm.pyx:923/928) while the hardcoded
-        final relaxation reads the dense matrix (hmm.pyx:946). Measured on this model,
+        edges: the main DP reads the CSR copy (hmm.pyx:920/925) while the hardcoded
+        final relaxation reads the dense matrix (hmm.pyx:943). Measured on this model,
         writing the final edge through a writable view moved a 151-base sequence's score
         from -335.85084206362586 to -336.85084206362586 while nbr_logp[9015] stayed 0.0
         -- i.e. a test could silently desynchronise the two stages of the decoder it is

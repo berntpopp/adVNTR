@@ -67,7 +67,7 @@ jobs:
       # counted releases anywhere in a 1.7 MB generated file. Measured on a build where the
       # DP holds the GIL and one unrelated function releases it, that grep reports GREEN;
       # the script reports the DP call outside any released region and exits 1.
-      - name: Assert the Viterbi DP still runs without the GIL
+      - name: Assert the DP call is still emitted inside a nogil region
         run: python scripts/assert_gil_release.py hmm/hmm.c
 
       - name: Unit suite, Tier 1 equivalence gate, characterization

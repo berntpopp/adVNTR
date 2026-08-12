@@ -130,8 +130,6 @@ class TestDecoding(unittest.TestCase):
         self.assertEqual(len(model.seen), 4)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class _OrientedModel(object):
@@ -153,8 +151,9 @@ class TestOnlyTheWinningTracebackIsRetained(unittest.TestCase):
 
     Pristine was already O(coverage): it retains the winning vpath of every SELECTED read
     for the life of the return value. What the restructure added was the losing
-    orientation, and the rejected reads, on top of that. Dropping the loser is therefore
-    not a new policy, it is the pristine retention profile.
+    orientation, and the rejected reads, on top of that. Dropping the loser removes the
+    first of those two, not both -- one traceback per ELIGIBLE read is still more than
+    pristine's one per selected read (1,617 against 1,047 on example_7a61).
 
     The traceback that survives must be the one phase 3 picks (vntr_finder.py:1140-1142),
     whose test is `logp < rev_logp` -- so forward wins a tie.
@@ -214,3 +213,7 @@ class TestOnlyTheWinningTracebackIsRetained(unittest.TestCase):
         for item in pending:
             retained = [path for path in (item.vpath, item.rev_vpath) if path is not None]
             self.assertEqual(len(retained), 1)
+
+
+if __name__ == '__main__':
+    unittest.main()

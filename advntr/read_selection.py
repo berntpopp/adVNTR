@@ -95,8 +95,13 @@ def _decode_one(model, pending):
 
     Pristine was not O(1) either -- it retains the winning vpath of every SELECTED read for
     the life of the return value, which `find_frameshift_from_selected_reads` and
-    `iteratively_update_model` then consume. So this is not a new retention policy; it is
-    the pristine one, restored.
+    `iteratively_update_model` then consume. This does NOT restore that profile, and saying
+    so would be the same overclaim `e89bfa7` removed from the Tier 3 manifest: what is
+    retained here is one traceback per ELIGIBLE read, and eligible exceeds selected because
+    a read rejected in phase 3 still holds its path until the loop ends. On
+    example_7a61 that is 1,617 eligible against 1,047 selected -- 570 tracebacks pristine
+    had already freed. Two per eligible read has become one; one per selected read is still
+    below us.
 
     The test below is exactly phase 3's (`vntr_finder.py:1141`), so the survivor is always
     the traceback phase 3 goes on to select -- including the tie, where `<` keeps forward.

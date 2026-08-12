@@ -7,7 +7,7 @@ export PATH := $(ENVBIN):$(PATH)
 
 VNTYPER_DATA ?= /home/bernt-popp/development/VNtyper/tests/data
 
-.PHONY: build test gate coverage-ratchet no-upstream-remote loc-ratchet tier2 clean
+.PHONY: build test gate coverage-ratchet no-upstream-remote loc-ratchet tier2 tier3-baseline clean
 
 build:
 	python setup_hmm.py build_ext --inplace
@@ -41,6 +41,12 @@ sys.exit(0 if now >= base else 'coverage fell: %.1f%% -> %.1f%%' % (base, now))"
 tier2:
 	python -m advntr_harness.capture --tier 2 --out /tmp/advntr-tier2 \
 		--vntyper-data $(VNTYPER_DATA) --verify tests/golden
+
+# Recapture tests/golden/tier3_manifest.json. The manifest is a REGRESSION baseline, not a
+# pristine one -- Tier 1 is the pristine gate -- so recapturing it after an intended
+# read-loop change is legitimate; recapturing it to make a red gate go green is not.
+tier3-baseline:
+	python -m advntr_harness.tier3 --bam $(VNTYPER_DATA)/example_7a61_hg19_subset.bam
 
 gate: no-upstream-remote loc-ratchet build test coverage-ratchet
 	@echo "gate: PASS"

@@ -1,4 +1,10 @@
-"""Assert the Viterbi DP actually runs without the GIL.
+"""Assert the generated C emits the Viterbi DP call inside a GIL-released region.
+
+That is what this proves, and the title says so deliberately: it reads `hmm.c`, not the
+compiled `.so`. A build without `WITH_THREAD` strips the macros and would pass while
+holding the GIL, and nothing in this suite measures wall-clock or scaling. The property
+is "Cython was told to release it and has not silently stopped", not "the process ran
+concurrently".
 
 The check this replaces counted `Py_UNBLOCK_THREADS` anywhere in the generated `hmm.c`
 and passed on one or more. That was true but unscoped: `hmm.pyx` happens to contain
@@ -84,6 +90,13 @@ def dp_call_offsets(source):
     runs anything -- counting them would report two permanently unguarded "calls" and make
     this check fail on a correct build.
 
+    The prefix examined is the enclosing *statement*, not the line, and the test is that it
+    *begins* with the storage class rather than containing it anywhere. Both matter:
+    `static double __pyx_v_x; fill_status = _viterbi_fill(...)` is one line holding a
+    declaration and a genuine call, and either a line-scoped prefix or a substring test
+    drops the call. A dropped call that leaves one guarded call behind makes this whole
+    check exit 0 -- a false pass, which is the only direction that costs anything here.
+
     Args:
         source: The generated C.
 
@@ -93,8 +106,8 @@ def dp_call_offsets(source):
     offsets = []
     cursor = source.find(DP_CALL)
     while cursor != -1:
-        line_start = source.rfind('\n', 0, cursor) + 1
-        if 'static' not in source[line_start:cursor]:
+        statement_start = max(source.rfind(boundary, 0, cursor) for boundary in ('\n', ';', '{', '}')) + 1
+        if not source[statement_start:cursor].lstrip().startswith('static'):
             offsets.append(cursor)
         cursor = source.find(DP_CALL, cursor + 1)
     return offsets

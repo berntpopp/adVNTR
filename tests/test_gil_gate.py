@@ -103,6 +103,19 @@ class TestTheGilCheckFollowsTheDpCall(unittest.TestCase):
         self.assertEqual(len(dp_call_offsets(source)), 1)
         self.assertEqual(unguarded_dp_calls(source), [])
 
+    def test_a_call_on_a_line_that_mentions_static_is_still_a_call(self):
+        """`'static' not in prefix` is a substring test, not "this line is a declaration".
+
+        Any genuine DP call whose line prefix happens to contain the token drops out of the
+        call list -- and if one other guarded call remains, `unguarded_dp_calls` returns []
+        and the gate exits 0. That is a FALSE PASS, which is the direction that matters:
+        this check exists precisely to keep working when the generated C changes shape.
+        """
+        source = 'static double __pyx_v_x; __pyx_v_fill_status = %sargs);' % DP_CALL
+
+        self.assertEqual(len(dp_call_offsets(source)), 1)
+        self.assertEqual(len(unguarded_dp_calls(GUARDED + '\n' + source)), 1)
+
     def test_a_missing_dp_is_an_error_and_not_a_pass(self):
         """Renaming the Cython function must break this loudly rather than quietly."""
         self.assertRaises(ValueError, unguarded_dp_calls,
