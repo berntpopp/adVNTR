@@ -88,7 +88,7 @@ def process_vntrseek_data(unprocessed_vntrs_file, output_file='vntr_data/VNTRs.t
             continue
         repeat_segments = ','.join(vntr.get_repeat_segments())
         with open(output_file, 'a') as out:
-            end_point = vntr.start_point + vntr.get_length()
+            end_point = vntr.get_genomic_end()
             gene_name, annotation = get_gene_name_and_annotation_of_vntr(vntr.chromosome, vntr.start_point, end_point)
             out.write('%s %s %s %s %s %s %s %s %s %s\n' % (vntr.id, vntr.is_non_overlapping(), vntr.chromosome,
                                                            vntr.start_point, gene_name, annotation, vntr.pattern,
@@ -127,12 +127,31 @@ def load_unique_vntrs_data(db_file=None, target_vids={}):
         db_file = settings.TRAINED_MODELS_DB
     db = sqlite3.connect(db_file)
     cursor = db.cursor()
+    # ref_end records the array's genomic end. Models that predate it keep falling back
+    # to start_point + get_length(). See berntpopp/adVNTR#1.
+    #
+    # v2 models live in `vntrs_v2` rather than `vntrs` on purpose. An adVNTR that does
+    # not know about ref_end selects the eleven legacy columns by name, so a ref_end
+    # column added to `vntrs` would be dropped silently and the truncated window
+    # recreated with no error at all. A separate table makes that read fail loudly.
+    tables = set(row[0] for row in cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"))
+    if 'vntrs_v2' in tables:
+        table = 'vntrs_v2'
+    elif 'vntrs' in tables:
+        table = 'vntrs'
+    else:
+        raise ValueError(
+            '%s contains no VNTR table (expected `vntrs_v2` or `vntrs`)' % db_file)
+    columns = set(row[1] for row in cursor.execute('PRAGMA table_info(%s)' % table))
+    has_ref_end = 'ref_end' in columns
     cursor.execute('''SELECT id, nonoverlapping, chromosome, ref_start, gene_name, annotation, pattern, left_flanking,
-    right_flanking, repeats, scaled_score FROM vntrs''')
+    right_flanking, repeats, scaled_score%s FROM %s''' % (', ref_end' if has_ref_end else '', table))
 
     for row in cursor:
+        ref_end = row[11] if has_ref_end else None
         new_row = []
-        for element in row:
+        for element in row[:11]:
             if type(element) != int and type(element) != float:
                 new_row.append(str(element))
             else:
@@ -143,6 +162,7 @@ def load_unique_vntrs_data(db_file=None, target_vids={}):
         vntr = ReferenceVNTR(int(vntr_id), pattern, int(start), chrom, gene, annotation, repeats, scaled_score=score)
         vntr.init_from_xml(repeat_segments, left_flank, right_flank)
         vntr.non_overlapping = True if overlap == 'True' else False
+        vntr.ref_end = int(ref_end) if ref_end is not None else None
         if len(target_vids) > 0:
             if vntr_id in target_vids:
                 vntrs.append(vntr)
@@ -305,7 +325,7 @@ def extend_flanking_regions_in_processed_vntrs(flanking_size=500, output_file='v
             reference_genomes[vntr.chromosome] = get_chromosome_reference_sequence(vntr.chromosome)
         start = vntr.start_point
         left_flanking_region = reference_genomes[vntr.chromosome][start-flanking_size:start].upper()
-        end = vntr.start_point + vntr.get_length()
+        end = vntr.get_genomic_end()
         right_flanking_region = reference_genomes[vntr.chromosome][end:end+flanking_size].upper()
         with open(output_file, 'a') as out:
             out.write('%s %s %s %s %s\n' % (vntr.id, vntr.is_non_overlapping(), left_flanking_region,

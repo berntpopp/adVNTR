@@ -81,7 +81,7 @@ def get_reads_from_samfile(read_names, read_file='original_reads/paired_dat.sam'
 def get_id_of_reads_mapped_to_vntr_in_bamfile(bam_file, reference_vntr):
     alignment_file = pysam.AlignmentFile(bam_file, 'rb')
     start = reference_vntr.start_point
-    end = reference_vntr.start_point + reference_vntr.get_length()
+    end = reference_vntr.get_genomic_end()
     reads = []
     for read in alignment_file.fetch(reference_vntr.chromosome, start, end):
         if read.is_secondary or read.is_supplementary:
@@ -100,7 +100,7 @@ def get_reads_mapped_to_vntr_in_samfile(sam_file, reference_vntr, read_length=15
     alignment_file = pysam.AlignmentFile(sam_file, 'r')
     if not region:
         start = reference_vntr.start_point
-        end = reference_vntr.start_point + reference_vntr.get_length()
+        end = reference_vntr.get_genomic_end()
     else:
         start, end = region
     reads = []

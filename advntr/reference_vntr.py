@@ -16,6 +16,7 @@ class ReferenceVNTR:
         self.gene_name = gene_name
         self.annotation = annotation
         self.estimated_repeats = estimated_repeats
+        self.ref_end = None
         self.repeat_segments = []
         self.left_flanking_region = None
         self.right_flanking_region = None
@@ -41,7 +42,36 @@ class ReferenceVNTR:
         return self.has_homologous
 
     def get_length(self):
+        """Total length of the stored repeat units.
+
+        This is a property of the model's contents, not a genomic coordinate. Use
+        get_genomic_end() to bound a region on the reference.
+        """
         return sum([len(e) for e in self.repeat_segments])
+
+    def get_genomic_end(self):
+        """End coordinate of the repeat array on the reference.
+
+        Returns the recorded end when the model carries one. Otherwise falls back to
+        start_point + get_length(), which is only the array's extent when the stored
+        segments tile it end to end exactly once -- see segments_tile_reference().
+        Models predating the recorded end keep exactly the behaviour they had.
+        """
+        if self.ref_end is not None:
+            return self.ref_end
+        return self.start_point + self.get_length()
+
+    def segments_tile_reference(self, chromosome_sequence=None):
+        """Do the stored segments reproduce the reference at start_point?
+
+        When they do not, the model describes something other than a contiguous tiling
+        of the array, and start_point + get_length() is not its genomic extent.
+        """
+        sequence = chromosome_sequence if chromosome_sequence is not None else self.chromosome_sequence
+        if not sequence:
+            return None
+        joined = ''.join(self.repeat_segments)
+        return sequence[self.start_point:self.start_point + len(joined)] == joined
 
     def get_repeat_segments(self):
         return self.repeat_segments
@@ -80,6 +110,6 @@ class ReferenceVNTR:
     def get_flanking_regions(self, flanking_region_size=140):
         ref_sequence = self.__get_chromosome_reference_sequence()
         left_flanking = ref_sequence[self.start_point - flanking_region_size:self.start_point].upper()
-        end_of_repeats = self.start_point + self.get_length()
+        end_of_repeats = self.get_genomic_end()
         right_flanking = ref_sequence[end_of_repeats:end_of_repeats + flanking_region_size].upper()
         return left_flanking, right_flanking

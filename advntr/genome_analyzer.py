@@ -39,7 +39,7 @@ class GenomeAnalyzer:
     def print_genotype_in_bed_format(self, vntr_id, copy_numbers):
         chromosome = self.vntr_finder[vntr_id].reference_vntr.chromosome
         start = self.vntr_finder[vntr_id].reference_vntr.start_point
-        end = start + self.vntr_finder[vntr_id].reference_vntr.get_length()
+        end = self.vntr_finder[vntr_id].reference_vntr.get_genomic_end()
         gene = self.vntr_finder[vntr_id].reference_vntr.gene_name
         motif = self.vntr_finder[vntr_id].reference_vntr.pattern
         ref_copy = len(self.vntr_finder[vntr_id].reference_vntr.get_repeat_segments())
@@ -75,7 +75,7 @@ class GenomeAnalyzer:
         print(vntr.chromosome + "\t"),
         # POS
         start = vntr.start_point
-        end = start + vntr.get_length()
+        end = vntr.get_genomic_end()
         print(str(vntr.start_point) + "\t"),
         # ID
         id = '.'
