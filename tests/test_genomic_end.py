@@ -105,18 +105,17 @@ class DatabaseLoading(unittest.TestCase):
 
     def test_database_with_ref_end_uses_it(self):
         path = os.path.join(self.tmp, 'v2.db')
-        _write_db(path, V2_SCHEMA, self._row(extra=(START + 3525,)))
+        _write_db(path, V2_TABLE_SCHEMA, self._row(extra=(START + 3525,)))
         vntr = load_unique_vntrs_data(path)[0]
         self.assertEqual(vntr.ref_end, START + 3525)
         self.assertEqual(vntr.get_genomic_end(), START + 3525)
 
-    def test_null_ref_end_is_treated_as_absent(self):
-        # A v2 schema whose column was never populated must not become end=0.
-        path = os.path.join(self.tmp, 'v2null.db')
-        _write_db(path, V2_SCHEMA, self._row(extra=(None,)))
-        vntr = load_unique_vntrs_data(path)[0]
-        self.assertIsNone(vntr.ref_end)
-        self.assertEqual(vntr.get_genomic_end(), START + SUM_OF_SEGMENTS)
+    def test_a_ref_end_column_on_the_legacy_table_is_refused(self):
+        # An adVNTR without ref_end support selects the legacy columns by name, so it
+        # would drop this column and reproduce the truncated window in silence.
+        path = os.path.join(self.tmp, 'legacy_with_end.db')
+        _write_db(path, V2_SCHEMA, self._row(extra=(START + 3525,)))
+        self.assertRaises(ValueError, load_unique_vntrs_data, path)
 
 
 class FailsClosedForOldReaders(unittest.TestCase):
@@ -160,6 +159,37 @@ class FailsClosedForOldReaders(unittest.TestCase):
     def test_a_database_with_neither_table_says_so(self):
         path = os.path.join(self.tmp, 'empty.db')
         sqlite3.connect(path).execute('CREATE TABLE unrelated(x INTEGER)')
+        self.assertRaises(ValueError, load_unique_vntrs_data, path)
+
+    def test_a_v2_table_without_the_ref_end_column_is_refused(self):
+        # A legacy model wearing a v2 name would fall back to the truncated window
+        # while announcing itself as corrected.
+        path = os.path.join(self.tmp, 'v2_no_column.db')
+        schema = LEGACY_SCHEMA.replace('CREATE TABLE vntrs(', 'CREATE TABLE vntrs_v2(')
+        _write_db(path, schema, self._row())
+        self.assertRaises(ValueError, load_unique_vntrs_data, path)
+
+    def test_a_null_ref_end_in_a_v2_model_is_refused(self):
+        # Silently becoming the old window is the exact failure this table separation
+        # exists to prevent.
+        path = os.path.join(self.tmp, 'v2_null.db')
+        _write_db(path, V2_TABLE_SCHEMA, self._row(extra=(None,)))
+        self.assertRaises(ValueError, load_unique_vntrs_data, path)
+
+    def test_a_ref_end_at_or_before_ref_start_is_refused(self):
+        path = os.path.join(self.tmp, 'v2_backwards.db')
+        _write_db(path, V2_TABLE_SCHEMA, self._row(extra=(START - 1,)))
+        self.assertRaises(ValueError, load_unique_vntrs_data, path)
+
+    def test_a_database_carrying_both_tables_is_refused(self):
+        # Two readers would get two different models out of one file.
+        path = os.path.join(self.tmp, 'both.db')
+        _write_db(path, V2_TABLE_SCHEMA, self._row(extra=(START + 3525,)))
+        db = sqlite3.connect(path)
+        db.execute(LEGACY_SCHEMA)
+        db.execute('insert into vntrs values (%s)' % ','.join(['?'] * 11), self._row())
+        db.commit()
+        db.close()
         self.assertRaises(ValueError, load_unique_vntrs_data, path)
 
 
