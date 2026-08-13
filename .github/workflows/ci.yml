@@ -52,8 +52,15 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # muscle is pinned to the v3 series on purpose. `build_profile_hmm_for_repeats`
+          # invokes `muscle -clwstrict`, which MUSCLE v5 removed -- an unpinned install
+          # now resolves v5 and every model-building test errors with "Invalid command
+          # line". Adapting the flags would not be enough either: v5 is a different
+          # aligner and returns different alignments, so the profile HMMs built from
+          # them would differ and the Tier 1 byte-equivalence gate this fork rests on
+          # would no longer mean anything. The alignment tool is part of the result.
           conda install -y "cython=0.29.*" "numpy=1.16.*" scipy biopython pysam \
-                           muscle scikit-learn "coverage<5"
+                           "muscle=3.8.1551" scikit-learn "coverage<5"
 
       - name: Build the extension
         run: python setup_hmm.py build_ext --inplace
