@@ -23,7 +23,11 @@ EXCLUDED_PREFIXES = ('pomegranate/',)
 
 
 def main():
-    tracked = subprocess.check_output(['git', 'ls-files']).split()
+    # Decode explicitly. check_output returns bytes, and on Python 3 comparing those to
+    # the str suffixes below raises TypeError, so this ratchet only ever ran under the
+    # Python 2 interpreter `make test` uses -- on CI's Python 3 it aborted before
+    # checking a single file. Decoding makes it run on both.
+    tracked = subprocess.check_output(['git', 'ls-files']).decode('utf-8').split()
     checked = 0
     failures = []
     for path in tracked:
