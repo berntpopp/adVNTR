@@ -66,7 +66,7 @@ class VNTRFinder:
         self.minimum_right_flanking_size = {69212: 19, 532789: 12, 400825: 10, 468671: 10}
 
         self.vntr_start = self.reference_vntr.start_point
-        self.vntr_end = self.vntr_start + self.reference_vntr.get_length()
+        self.vntr_end = self.reference_vntr.get_genomic_end()
 
         self.is_frameshift_mode = is_frameshift_mode
         self.hmm = None
@@ -796,7 +796,7 @@ class VNTRFinder:
     def check_if_pacbio_mapped_read_spans_vntr(self, sema, read, length_distribution, spanning_reads):
         flanking_region_size = 100
         region_start = self.reference_vntr.start_point - flanking_region_size
-        region_end = self.reference_vntr.start_point + self.reference_vntr.get_length()
+        region_end = self.reference_vntr.get_genomic_end()
         if read.get_reference_positions()[0] < region_start and read.get_reference_positions()[-1] > region_end:
             read_region_start = None
             read_region_end = None
@@ -840,7 +840,7 @@ class VNTRFinder:
         mapped_spanning_reads = manager.list()
 
         vntr_start = self.reference_vntr.start_point
-        vntr_end = self.reference_vntr.start_point + self.reference_vntr.get_length()
+        vntr_end = self.reference_vntr.get_genomic_end()
         region_start = vntr_start
         region_end = vntr_end
         read_mode = self.get_alignment_file_read_mode(alignment_file)
@@ -1060,7 +1060,7 @@ class VNTRFinder:
 
         vntr_bp_in_mapped_reads = 0
         vntr_start = self.reference_vntr.start_point
-        vntr_end = self.reference_vntr.start_point + self.reference_vntr.get_length()
+        vntr_end = self.reference_vntr.get_genomic_end()
         read_mode = self.get_alignment_file_read_mode(alignment_file)
         samfile = pysam.AlignmentFile(alignment_file, read_mode, reference_filename=self.reference_filename)
         reference = get_reference_genome_of_alignment_file(samfile)
@@ -1338,7 +1338,7 @@ class VNTRFinder:
         hashed_keywords = set([get_hash(keyword) for keyword in keywords])
         match_positions = []
         vntr_start = self.reference_vntr.start_point
-        vntr_end = vntr_start + self.reference_vntr.get_length()
+        vntr_end = self.reference_vntr.get_genomic_end()
         fasta_sequences = SeqIO.parse(open(reference_file), 'fasta')
         for fasta in fasta_sequences:
             name, sequence = fasta.id, str(fasta.seq)

@@ -88,7 +88,7 @@ def process_vntrseek_data(unprocessed_vntrs_file, output_file='vntr_data/VNTRs.t
             continue
         repeat_segments = ','.join(vntr.get_repeat_segments())
         with open(output_file, 'a') as out:
-            end_point = vntr.start_point + vntr.get_length()
+            end_point = vntr.get_genomic_end()
             gene_name, annotation = get_gene_name_and_annotation_of_vntr(vntr.chromosome, vntr.start_point, end_point)
             out.write('%s %s %s %s %s %s %s %s %s %s\n' % (vntr.id, vntr.is_non_overlapping(), vntr.chromosome,
                                                            vntr.start_point, gene_name, annotation, vntr.pattern,
@@ -127,12 +127,52 @@ def load_unique_vntrs_data(db_file=None, target_vids={}):
         db_file = settings.TRAINED_MODELS_DB
     db = sqlite3.connect(db_file)
     cursor = db.cursor()
+    # ref_end records the array's genomic end. Models that predate it keep falling back
+    # to start_point + get_length(). See berntpopp/adVNTR#1.
+    #
+    # v2 models live in `vntrs_v2` rather than `vntrs` on purpose. An adVNTR that does
+    # not know about ref_end selects the eleven legacy columns by name, so a ref_end
+    # column added to `vntrs` would be dropped silently and the truncated window
+    # recreated with no error at all. A separate table makes that read fail loudly.
+    tables = set(row[0] for row in cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"))
+    if 'vntrs_v2' in tables and 'vntrs' in tables:
+        # Two readers would disagree about the same file: this adVNTR would read
+        # vntrs_v2 while one predating ref_end reads vntrs. A model that means two
+        # different things depending on who opens it is worse than no model.
+        raise ValueError(
+            '%s carries both `vntrs_v2` and `vntrs`. An adVNTR without ref_end support '
+            'would read `vntrs` and genotype against a different model than this one. '
+            'Ship exactly one table.' % db_file)
+    if 'vntrs_v2' in tables:
+        table = 'vntrs_v2'
+    elif 'vntrs' in tables:
+        table = 'vntrs'
+    else:
+        raise ValueError(
+            '%s contains no VNTR table (expected `vntrs_v2` or `vntrs`)' % db_file)
+    columns = set(row[1] for row in cursor.execute('PRAGMA table_info(%s)' % table))
+    has_ref_end = 'ref_end' in columns
+    if table == 'vntrs_v2' and not has_ref_end:
+        # The whole point of the v2 table is that it records the end. Without the
+        # column it is a legacy model wearing a v2 name, and it would fall back to the
+        # truncated window while announcing itself as corrected.
+        raise ValueError(
+            '%s has a `vntrs_v2` table with no `ref_end` column. A v2 model records the '
+            "array's genomic end; without it the fetch window silently reverts to "
+            'sum(len(repeat_segments)).' % db_file)
+    if table == 'vntrs' and has_ref_end:
+        raise ValueError(
+            '%s has a `ref_end` column on the legacy `vntrs` table. An adVNTR without '
+            'ref_end support selects the legacy columns by name and would ignore it. '
+            'Put v2 models in `vntrs_v2`.' % db_file)
     cursor.execute('''SELECT id, nonoverlapping, chromosome, ref_start, gene_name, annotation, pattern, left_flanking,
-    right_flanking, repeats, scaled_score FROM vntrs''')
+    right_flanking, repeats, scaled_score%s FROM %s''' % (', ref_end' if has_ref_end else '', table))
 
     for row in cursor:
+        ref_end = row[11] if has_ref_end else None
         new_row = []
-        for element in row:
+        for element in row[:11]:
             if type(element) != int and type(element) != float:
                 new_row.append(str(element))
             else:
@@ -143,6 +183,18 @@ def load_unique_vntrs_data(db_file=None, target_vids={}):
         vntr = ReferenceVNTR(int(vntr_id), pattern, int(start), chrom, gene, annotation, repeats, scaled_score=score)
         vntr.init_from_xml(repeat_segments, left_flank, right_flank)
         vntr.non_overlapping = True if overlap == 'True' else False
+        if table == 'vntrs_v2':
+            # A NULL or nonsensical end in a v2 model must not quietly become the old
+            # window. Every v2 row states its end or the model is rejected.
+            if ref_end is None:
+                raise ValueError(
+                    '%s: VNTR %s in `vntrs_v2` has a NULL ref_end. A v2 model must '
+                    'record the genomic end for every row.' % (db_file, vntr_id))
+            if int(ref_end) <= int(start):
+                raise ValueError(
+                    '%s: VNTR %s records ref_end=%s at or before ref_start=%s.'
+                    % (db_file, vntr_id, ref_end, start))
+        vntr.ref_end = int(ref_end) if ref_end is not None else None
         if len(target_vids) > 0:
             if vntr_id in target_vids:
                 vntrs.append(vntr)
@@ -152,7 +204,30 @@ def load_unique_vntrs_data(db_file=None, target_vids={}):
     return vntrs
 
 
+def _refuse_v2_mutation(db_file, operation):
+    """Model-mutating commands only understand the legacy `vntrs` table.
+
+    They would write to `vntrs` while load_unique_vntrs_data reads `vntrs_v2`, so a
+    successful-looking edit would never be seen by a genotyping run. Refuse rather than
+    accept a write that goes nowhere.
+    """
+    if db_file is None:
+        db_file = settings.TRAINED_MODELS_DB
+    connection = sqlite3.connect(db_file)
+    try:
+        tables = set(row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"))
+    finally:
+        connection.close()
+    if 'vntrs_v2' in tables:
+        raise ValueError(
+            '%s is a v2 model database; `%s` only edits the legacy `vntrs` table, so '
+            'the change would be invisible to genotyping. Regenerate the model instead.'
+            % (db_file, operation))
+
+
 def save_vntrs_to_database(processed_vntrs, db_file):
+    _refuse_v2_mutation(db_file, 'save_vntrs_to_database')
     with open(processed_vntrs) as input_file:
         lines = input_file.readlines()
     db = sqlite3.connect(db_file)
@@ -176,6 +251,7 @@ def save_vntrs_to_database(processed_vntrs, db_file):
 
 
 def update_trained_score_in_database(vntr_id, scaled_recruitment_score):
+    _refuse_v2_mutation(None, 'update_trained_score_in_database')
     db = sqlite3.connect(settings.TRAINED_MODELS_DB)
     cursor = db.cursor()
     cursor.execute('''UPDATE vntrs SET scaled_score=? WHERE id=?''', (scaled_recruitment_score, vntr_id))
@@ -220,6 +296,7 @@ def get_largest_id_in_database():
 
 
 def delete_vntr_from_database(vntr_id):
+    _refuse_v2_mutation(None, 'delete_vntr_from_database')
     db = sqlite3.connect(settings.TRAINED_MODELS_DB)
     cursor = db.cursor()
     cursor.execute('DELETE FROM vntrs WHERE id=%s' % vntr_id)
@@ -305,7 +382,7 @@ def extend_flanking_regions_in_processed_vntrs(flanking_size=500, output_file='v
             reference_genomes[vntr.chromosome] = get_chromosome_reference_sequence(vntr.chromosome)
         start = vntr.start_point
         left_flanking_region = reference_genomes[vntr.chromosome][start-flanking_size:start].upper()
-        end = vntr.start_point + vntr.get_length()
+        end = vntr.get_genomic_end()
         right_flanking_region = reference_genomes[vntr.chromosome][end:end+flanking_size].upper()
         with open(output_file, 'a') as out:
             out.write('%s %s %s %s %s\n' % (vntr.id, vntr.is_non_overlapping(), left_flanking_region,

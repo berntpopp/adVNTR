@@ -223,7 +223,7 @@ if __name__ == '__main__':
     db_file = 'vntr_data/hg38_genic_VNTRs.db'
     reference_vntrs = load_unique_vntrs_data(db_file)
     for ref_vntr in reference_vntrs:
-        end = ref_vntr.start_point + ref_vntr.get_length()
+        end = ref_vntr.get_genomic_end()
         new_gene, new_annotation = get_gene_name_and_annotation_of_vntr(ref_vntr.chromosome, ref_vntr.start_point, end, genes_info, exons_info, introns_info, utr3_info, utr5_info, name_mapping)
         if new_gene == 'None' and ref_vntr.gene_name != 'None':
             new_gene = ref_vntr.gene_name

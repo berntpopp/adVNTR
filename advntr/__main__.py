@@ -32,6 +32,9 @@ def main():
 
     usage = '\r{}\nusage: %(prog)s <command> [options]\n\n\r{}\r{}'.format(description.ljust(len('usage:')), help, '\n')
     parser = argparse.ArgumentParser(usage=usage, add_help=False)
+    # A consumer that needs the explicit-genomic-end behaviour has to be able to ask
+    # which adVNTR it is talking to before it hands over a v2 model.
+    parser.add_argument('--version', action='version', version=__version__)
     subparsers = parser.add_subparsers(title='Commands', dest='command')
 
     fmt = lambda prog: CustomHelpFormatter(prog)
