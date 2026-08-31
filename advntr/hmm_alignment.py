@@ -131,6 +131,19 @@ def get_modified_base_count_for_reference(detected_mutation):
     # return deletion_count - insertion_count
 
 
+def _extend_mutation_sequence(mutation_sequence, addition):
+    """Join mutation tokens with '&', starting a new sequence when none is open.
+
+    `None` means no sequence is open yet, which is not the same as an empty one: only
+    `None` suppresses the separator. Both join sites in `generate_aln` route through
+    here so the two cannot drift apart again -- Case 3 previously lacked the guard Case
+    1 had, and raised TypeError after the genotype table was already written.
+    """
+    if mutation_sequence is None:
+        return addition
+    return mutation_sequence + '&' + addition
+
+
 def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference_vntr_db=None, ref_vntr_dict=None):
     """
     Parse an advntr logfile, find specified mutations (or all if none given),
@@ -349,11 +362,8 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                 # In this case, the deletion is connected to the previous mutation sequence and skip
                                 if (prev_mutation_index + 1 == current_mutation_index
                                     and prev_hmm_index == current_hmm_index):
-                                    # <-- FIX: handle None mutation_sequence
-                                    if mutation_sequence is None:
-                                        mutation_sequence = temp_mutation
-                                    else:
-                                        mutation_sequence += '&' + temp_mutation
+                                    mutation_sequence = _extend_mutation_sequence(
+                                        mutation_sequence, temp_mutation)
                                 # Case 2: I/D(j), D(i), j < i-1
                                 # In this case, they are not connected (This should be rare, two separated deletions in a RU)
                                 else:
@@ -369,8 +379,10 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                 if (prev_mutation_index == current_mutation_index
                                     and prev_hmm_index == current_hmm_index):
                                     # Add the insertion and done
-                                    mutation_sequence += "&{}_LEN{}".format(temp_mutation,
-                                                                            mutation_count_temp[temp_mutation])
+                                    mutation_sequence = _extend_mutation_sequence(
+                                        mutation_sequence,
+                                        "{}_LEN{}".format(temp_mutation,
+                                                          mutation_count_temp[temp_mutation]))
                                     if mutation_sequence in target_mutations:
                                         vid_to_aln_info[vid][mutation_sequence].append(
                                             (sequence, visited_states, read_name))
