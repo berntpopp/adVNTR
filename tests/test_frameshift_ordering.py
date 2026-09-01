@@ -3,6 +3,7 @@
 The emitted call set must stay the same, but tied rows must not depend on the order in
 which the mutation dictionary first saw them.
 """
+import logging
 import unittest
 
 from advntr import settings
@@ -25,10 +26,32 @@ class _OrderingFinder(VNTRFinder):
         return 0.0, 1.0, 0.0
 
 
+class _RealignmentVisibilityFinder(_OrderingFinder):
+    def get_repeat_unit_number(self, _read):
+        return ['1', '3', '2'], ['A' * 60, 'C' * 60, 'G' * 60], [0, 60, 120, 180]
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        logging.Handler.__init__(self)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
 def _vpath(state_names):
     return ([(0, _FakeState('start'))] +
             [(i + 1, _FakeState(name)) for i, name in enumerate(state_names)] +
             [(len(state_names) + 1, _FakeState('end'))])
+
+
+def _matching_read(length, query_name):
+    states = ['unit_start_1']
+    for index in range(1, length + 1):
+        states.append('M%d_1' % index)
+    states.append('unit_end_1')
+    return SelectedRead('A' * length, -1.0, _vpath(states), query_name=query_name)
 
 
 def _deletion_read(position, query_name):
@@ -107,6 +130,35 @@ class TestFrameshiftOrdering(unittest.TestCase):
         ])
 
         self.assertEqual(states, ['D41_1', 'I42_1_A_LEN1'])
+
+    def test_logs_once_when_repeat_unit_realignment_is_inactive_below_three_units(self):
+        """Dropping the low-coverage visibility log would hide a real disabled branch."""
+        settings.USE_REF_ALIGNMENT = True
+        reference = ReferenceVNTR(2, 'A' * 60, 100, 'chr1', None, None)
+        reference.init_from_xml(['A' * 60, 'C' * 60, 'G' * 60], 'TTTTTTTTTT', 'GGGGGGGGGG')
+        finder = _RealignmentVisibilityFinder(reference, is_frameshift_mode=True)
+        finder.hmm = type(str('_ReadLength151'), (object,), {'read_length_used_to_build_model': 151})()
+
+        handler = _LogCapture()
+        root_logger = logging.getLogger()
+        original_level = root_logger.level
+        root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
+        try:
+            finder.find_frameshift_from_selected_reads([
+                _matching_read(60, 'r1'),
+                _matching_read(60, 'r2'),
+            ])
+        finally:
+            root_logger.removeHandler(handler)
+            root_logger.setLevel(original_level)
+            settings.USE_REF_ALIGNMENT = False
+
+        inactive_messages = [message for message in handler.messages
+                             if 'repeat-unit realignment is inactive' in message]
+        self.assertEqual(len(inactive_messages), 1)
+        self.assertIn('151', inactive_messages[0])
+        self.assertIn('60', inactive_messages[0])
 
 
 if __name__ == '__main__':

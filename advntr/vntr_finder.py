@@ -347,7 +347,6 @@ class VNTRFinder:
 
         ru_bp_coverage = defaultdict(int)
         hmm_match_count = defaultdict(int)
-
         reference_repeat_order = []
         if self.is_frameshift_mode:
             patterns = self.reference_vntr.get_repeat_segments()
@@ -356,22 +355,24 @@ class VNTRFinder:
             reference_repeat_order = self.get_reference_repeat_order(patterns, sorted_unique_patterns)
         else:
             pattern_clusters = get_pattern_clusters(self.reference_vntr.get_repeat_segments())
-
         estimated_ru_count = defaultdict(int)
         for i in range(len(pattern_clusters)):
             estimated_ru_count[str(i + 1)] = len(pattern_clusters[i])
             hmm_match_count[str(i + 1)] = len(pattern_clusters[i][0])  # sequence length itself
-
         if self.is_frameshift_mode:
             # Build reference repeat order table once for a quick lookup
+            repeat_unit_length = len(self.reference_vntr.pattern)
             valid_repeat_orders_in_reference = self.get_valid_repeat_orders(reference_repeat_order)
-            max_covered_repeat = self.hmm.read_length_used_to_build_model / len(self.reference_vntr.pattern)
-
+            max_covered_repeat_ratio = float(self.hmm.read_length_used_to_build_model) / repeat_unit_length
+            if settings.USE_REF_ALIGNMENT and max_covered_repeat_ratio < 3:
+                logging.info('repeat-unit realignment is inactive: read length %s covers %.2f repeat units of '
+                             'length %s (< 3)' % (self.hmm.read_length_used_to_build_model,
+                                                  max_covered_repeat_ratio, repeat_unit_length))
+            max_covered_repeat = self.hmm.read_length_used_to_build_model / repeat_unit_length
         for read in selected_reads:
             if settings.USE_REF_ALIGNMENT:
                 # TODO: Read Vpath once
                 read_as_repeat_unit_number, annotated_read, unit_start_points = self.get_repeat_unit_number(read)
-
                 logging.debug("Reference repeat order: {}".format(reference_repeat_order))
                 logging.debug("Read repeat order: {}".format(read_as_repeat_unit_number))
                 # Repeat expansion check
@@ -397,11 +398,9 @@ class VNTRFinder:
                                                                                                correct_repeats[0]))
                                 # Get the corresponding sequence for the mutated repeat units
                                 subsequence_with_repeat_number_conflict = annotated_read[mutated_repeat_indices[0]]
-
                                 # Re-align the region with the hmm
                                 _, vpath = self.hmm.subseq_viterbi(subsequence_with_repeat_number_conflict,
                                                                    correct_repeats[0])
-
                                 # Replace the annotation of the aligned region
                                 replace_start = unit_start_points[mutated_repeat_indices[0]] + 1
                                 replace_end = unit_start_points[mutated_repeat_indices[0] + 1]
