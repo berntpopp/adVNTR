@@ -49,7 +49,8 @@ does not mention muscle in its first line.
 | `make no-upstream-remote` | Fail if an `upstream` remote exists |
 | `python setup.py build_ext --inplace` | Full package build |
 | `python -m advntr_harness.capture --tier 1 --out tests/golden` | Re-capture Tier 1 fixtures |
-| `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | Full-corpus equivalence check |
+| `make tier2` | Full-corpus equivalence check against `tests/golden/tier2_manifest.json` |
+| `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | What `make tier2` runs, with an explicit `--out` |
 
 ## Layout
 
@@ -121,6 +122,12 @@ nothing at all for rejected reads.
 | 1 | 2,000 stratified fixtures, committed | ~15 s | Every CI run |
 | 2 | Full corpus from VNtyper's `tests/data` | hours | Before merging a decoder change |
 | 3 | Occurrence-level, whole BAMs through `select_illumina_reads` | minutes | Any threading change |
+
+`tests/golden/tier2_manifest.json` holds the pristine Tier 2 baseline: 8 files (the
+public `TIER2_FILES` corpus), 288,096 decode attempts, captured from this fork's
+pristine kernel (05fd98a) in an isolated worktree. Its `baseline_kind` and `note` fields
+say so directly -- see `advntr_harness/capture.py`'s `BASELINE_KIND`/`BASELINE_NOTE` and
+`tests/test_tier2_baseline.py`.
 
 Tier 1 strata are deliberate, and **every stratum must be non-empty** — capture fails
 otherwise. The `reverse_complement_wins` stratum is the one that matters most: measured
