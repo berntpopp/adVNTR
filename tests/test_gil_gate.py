@@ -138,9 +138,16 @@ class TestTheGeneratedExtension(unittest.TestCase):
     @needs_build
     def test_the_shipped_extension_calls_the_dp_at_all(self):
         """Non-vacuity against the real artefact: an empty call list would make the
-        assertion above pass for the wrong reason, which is why it raises instead."""
+        assertion above pass for the wrong reason, which is why it raises instead.
+
+        Two GIL-released spans, not one, since Task 6: `viterbi()` now has a SECOND
+        `with nogil:` block around `_traceback` (the off-GIL traceback walk), distinct
+        from the DP fill's own. `unguarded_dp_calls` above is unaffected -- it checks
+        only that the DP CALL's offset falls inside some released span, not how many
+        spans exist -- so this is a non-vacuity count update, not a weakened check.
+        """
         with open(GENERATED) as handle:
             source = handle.read()
 
         self.assertEqual(len(dp_call_offsets(source)), 1)
-        self.assertEqual(len(gil_released_spans(source)), 1)
+        self.assertEqual(len(gil_released_spans(source)), 2)

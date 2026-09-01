@@ -4,6 +4,7 @@
 
 from collections import defaultdict
 from operator import attrgetter
+import threading
 
 from .base cimport DiscreteDistribution
 from .base cimport State
@@ -23,6 +24,63 @@ cimport cython
 # them behind one.
 DEF INSTRUMENTED = False
 include "_viterbi_fill_core.pxi"
+
+#: 256-entry base encoder, indexed by ord(); -1 is the sentinel get_encoded_sequence()
+#: raises KeyError on -- an array index replacing a dict lookup, same failure on an
+#: undeclared symbol (bake() already refuses a model whose emitting states do not
+#: declare all of A/C/G/T, precisely so that failure stays loud, not a silent 0).
+_BASE_CODE = [-1] * 256
+_BASE_CODE[ord('A')], _BASE_CODE[ord('C')] = 0, 1
+_BASE_CODE[ord('G')], _BASE_CODE[ord('T')] = 2, 3
+
+#: Per-thread DP scratch (threading.local(): genuinely per-thread, never on self --
+#: advntr/read_selection.py's docstring is why that matters). Re-keyed on n_states,
+#: never aliased: a numpy row-slice narrower than the buffer's own shape is not
+#: Fortran-contiguous (only a column slice is), so a differently sized model gets a
+#: wholly fresh pair rather than a sub-view of a bigger one. Column count (read
+#: length) alone grows in place, since that IS a safe column slice -- the common
+#: case, one model decoding many reads on a thread (task-6-report.md).
+_dp_scratch = threading.local()
+
+def _thread_scratch(n_states, n_cols):
+    cached = getattr(_dp_scratch, 'buffers', None)
+    if cached is None or cached[2] != n_states or cached[3] < n_cols:
+        cols = max(n_cols, cached[3]) if cached is not None and cached[2] == n_states else n_cols
+        cached = (np.empty((n_states, 2), dtype=np.double, order='F'),
+                  np.zeros((n_states, cols), dtype=np.intc, order='F'), n_states, cols)
+        _dp_scratch.buffers = cached
+    return cached[0], cached[1][:, :n_cols]
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef int _traceback(int[::1, :] vpath_table_row, unsigned char[::1] silent,
+                     int row, int col, int** out_rows) nogil:
+    """Walk vpath_table_row to the DP's origin into a malloc'd growable array (caller
+    frees) instead of the old `vpath.insert(0, ...)`, O(n^2) under the GIL for a
+    ~156-entry path (task-6-report.md). Runs nogil; the caller appends once per entry
+    and reverses, O(n), to recover start-to-end order.
+    """
+    cdef int cap = 256, n = 0, pred_row, pred_col
+    cdef int* buf = <int*> malloc(cap * sizeof(int))
+    cdef int* grown
+    if buf == NULL:
+        return -1
+    while True:
+        if n == cap:
+            grown = <int*> realloc(buf, 2 * cap * sizeof(int))
+            if grown == NULL:
+                free(buf)
+                return -1
+            buf, cap = grown, 2 * cap
+        buf[n] = row
+        n += 1
+        if row == 0 and col == 0:
+            out_rows[0] = buf
+            return n
+        pred_row = vpath_table_row[row, col]
+        pred_col = col if silent[pred_row] else col - 1
+        row, col = pred_row, pred_col
 
 
 cdef class Model(object):
@@ -204,6 +262,18 @@ cdef class Model(object):
         self.n_states = n_states
         self.transition_map = transition_map
 
+        # viterbi()'s traceback uses a row it already has as its own index instead of
+        # re-deriving it through state_to_index[states[row]] -- sound only because
+        # state_to_index is the plain positional inverse of states, built above by
+        # zip()ing each subModel's states against a range(). Verified equal for all
+        # 2,565 states of the shipped MUC1 model; asserted here so a future subModel
+        # topology that breaks the invariant (e.g. a duplicated state object) fails
+        # loudly instead of silently addressing the wrong state.
+        for index, state in enumerate(self.states):
+            if self.state_to_index[state] != index:
+                raise ValueError('state_to_index[states[%d]] != %d: viterbi() '
+                                 'addresses traceback rows directly and would '
+                                 'silently corrupt the path' % (index, index))
 
         self.transition_matrix = np.zeros((self.n_states, self.n_states), dtype=np.double, order='C')
         cdef int from_index = 0
@@ -284,55 +354,11 @@ cdef class Model(object):
         return view
 
     def _sort_states(self):
-        """
-        Sort states in pre-defined (topology of our hmm model) order.
-
-        State naming rule:
-        There should be three types of state except start and end
-        1. Insert
-        2. Match
-        3. Delete
-        Insertion states start with I
-        Match states start with M
-        Delete states start with D
-
-        Format:
-        I/M/D[index]_[repeating_unit_index]
-
-        Example:
-
-        total_hmm_start
-        --------------------------
-        suffix_matcher_hmm_start
-        ...
-        suffix_matcher_hmm_end
-        --------------------------
-        Repeating Pattern Matcher HMM Model-start
-        --------------------------
-        unit_start_1
-        I0_1
-        D1_1
-        M1_1
-        I1_1
-        ...
-        unit_end_1
-        --------------------------
-        unit_start_2
-        I0_2
-        D1_2
-        M1_2
-        I1_2
-        ...
-        unit_end_2
-        ...
-        --------------------------
-        Repeating Pattern Matcher HMM Model-end
-        --------------------------
-        prefix_matcher_hmm_start
-        ...
-        prefix_matcher_hmm_end
-        --------------------------
-        total_hmm_end
+        """Sort states into topology order: start, then per repeat-unit
+        [unit_start, I0, (D,M,I)*, unit_end], then end -- names are
+        I/M/D[index]_[repeat_unit_index], with the flanking unit_start/unit_end
+        markers being neither. bake() (Task 6) relies on the resulting self.states
+        always ending in the model's own end state, and beginning with start.
 
         :return: None
         """
@@ -397,18 +423,8 @@ cdef class Model(object):
         self.states = sorted_states
 
     def dense_transition_matrix( self ):
-        """Returns the dense transition matrix.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        matrix : numpy.ndarray, shape (n_states, n_states)
-            A dense transition matrix, containing the probability
-            of transitioning from each state to each other state.
-        """
+        """The dense (n_states, n_states) transition PROBABILITY matrix (not the log
+        matrix bake() builds as self.transition_matrix)."""
 
         m = len(self.states)
         transition_probabilities = np.zeros( (m, m) )
@@ -423,31 +439,9 @@ cdef class Model(object):
         return transition_probabilities
 
     def concatenate(self, other, suffix='', prefix='', transition_probability=1.0):
-        """Concatenate this model to another model.
-
-        Concatenate this model to another model in such a way that a single
-        probability 1 edge is added between self.end and other.start. Rename
-        all other states appropriately by adding a suffix or prefix if needed.
-
-        Parameters
-        ----------
-        other : HiddenMarkovModel
-            The other model to concatenate
-
-        suffix : str, optional
-            Add the suffix to the end of all state names in the other model.
-            Default is ''.
-
-        prefix : str, optional
-            Add the prefix to the beginning of all state names in the other
-            model. Default is ''.
-
-        transition_probability :
-            The transition probability from the last model and the other model
-
-        Returns
-        -------
-        None
+        """Append `other` as a new subModel, wiring self.end -> other.start at
+        `transition_probability`. `suffix`/`prefix` are accepted for the upstream
+        signature but unused here -- no caller on the supported path renames states.
         """
         self.append_subModel(other)
         self.n_subModels += 1
@@ -585,8 +579,12 @@ cdef class Model(object):
                     vpath_table_col[zero_based_neighbor_index][col + 1] = col
 
     cpdef get_encoded_sequence(self, sequence):
-        key_map = {'A':0, 'C':1, 'G':2, 'T':3}
-        encoded_seq = [key_map[ch] for ch in sequence]
+        cdef int i, n = len(sequence)
+        encoded_seq = [0] * n
+        for i in range(n):
+            encoded_seq[i] = _BASE_CODE[ord(sequence[i])]
+            if encoded_seq[i] < 0:
+                raise KeyError(sequence[i])
         return np.array(encoded_seq, dtype=np.intc)
 
     @cython.wraparound(False)
@@ -605,22 +603,16 @@ cdef class Model(object):
         if not self.is_baked:
             raise ValueError("ERROR: To call viterbi, the model must have been baked")
 
-        # Find start and end index of repeats matcher
-        cdef Model repeat_matcher_model = self.subModels[1]
-        cdef int repeat_start_index = self.state_to_index[repeat_matcher_model.start]
-        cdef int repeat_end_index = self.state_to_index[repeat_matcher_model.end]
-
         # Initialize dynamic programming table
         # Rows represent states and Columns represent sequence
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
 
-        # Rolled to 2 columns, parity-addressed inside _viterbi_fill: 3.12 MB -> 41 KB/call (task-5-report.md).
-        cdef double[::1,:] dynamic_table = np.full((self.n_states, 2), -np.inf, dtype=np.double, order='F')
-        dynamic_table[self.state_to_index[self.start]][0] = log(1)
-
-        # Predecessor row only -- column is derived at traceback time, not stored.
-        cdef int[::1,:] vpath_table_row = np.zeros((self.n_states, sequence_length + 1), dtype=np.intc, order='F')
+        # Per-thread (never self -- read_selection.py) scratch from _thread_scratch,
+        # amortising the ~1.56 MB vpath allocation across calls on this thread.
+        scratch_score, scratch_vpath = _thread_scratch(self.n_states, sequence_length + 1)
+        cdef double[::1,:] dynamic_table = scratch_score
+        cdef int[::1,:] vpath_table_row = scratch_vpath
 
         cdef int row, col, ch
 
@@ -636,6 +628,12 @@ cdef class Model(object):
 
         cdef int fill_status = 0
         with nogil:
+            # Reused scratch is not guaranteed -inf like a fresh np.full was; reset
+            # here, under nogil, before _viterbi_fill's own per-column reset takes over.
+            for row in range(self.n_states):
+                dynamic_table[row, 0] = -INFINITY
+                dynamic_table[row, 1] = -INFINITY
+            dynamic_table[start_index, 0] = log(1)
             fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
                           indptr, indices, silent, emissions,
                           weights, threshold, sequence_length,
@@ -647,7 +645,7 @@ cdef class Model(object):
         col = sequence_length
         cdef int col_phys = col & 1  # physical index into the rolled table, not the logical column
         state = self.states[self.n_states-2]
-        row = self.state_to_index[state]
+        row = self.n_states - 2  # state_to_index[states[row]] == row (bake() asserts it)
 
         cdef int neighbor_state_index = 0
         cdef double log_prob = 0
@@ -660,20 +658,25 @@ cdef class Model(object):
                 vpath_table_row[neighbor_state_index][col] = row
 
         # Back tracking viterbi path from the Prefix Matcher End
-        cdef list vpath = []
-        cdef int end_index = self.state_to_index[self.subModels[self.n_subModels-1].end]
-
-        vpath.insert(0, (end_index, self.subModels[self.n_subModels-1].end))
-        row, col = vpath_table_row[end_index][sequence_length], (sequence_length if silent[vpath_table_row[end_index][sequence_length]] else sequence_length - 1)
-
+        cdef int end_index = self.n_states - 1  # == state_to_index[subModels[-1].end]
         cdef double logp = dynamic_table[end_index][col_phys]
-        if logp == -np.inf:  # no path with satisfying the threshold
-            return logp, vpath
+        if logp == -np.inf:  # no path satisfying the threshold
+            return logp, [(end_index, self.subModels[self.n_subModels-1].end)]
 
-        while row != 0 or col != 0:
-            vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
-            row, col = vpath_table_row[row][col], (col if silent[vpath_table_row[row][col]] else col - 1)
-        vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
+        # _traceback walks nogil into a malloc'd array; append once + reverse
+        # replaces the old O(n^2) front-of-list insertion under the GIL.
+        cdef int* path_rows
+        cdef int path_len
+        with nogil:
+            path_len = _traceback(vpath_table_row, silent, end_index, sequence_length, &path_rows)
+        if path_len < 0:
+            raise MemoryError('Viterbi traceback could not be grown')
+
+        cdef list vpath = []
+        for row in range(path_len):
+            vpath.append((path_rows[row], self.states[path_rows[row]]))
+        free(path_rows)
+        vpath.reverse()
         return logp, vpath
 
     def check_sanity_of_transition_prob(self, verbose):

@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1429 |
-| `hmm/hmm.pyx` | 712 |
+| `hmm/hmm.pyx` | 694 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
 
@@ -229,6 +229,17 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **`recruit_read` needs the vpath, not indices.** It calls
   `get_number_of_matches_in_vpath`, which unpacks `(idx, state)` tuples. Passing a tuple
   of ints raises `TypeError: 'int' object is not iterable`.
+
+- **`self.subModels[1]` segfaults, not IndexErrors, on a model with only one
+  subModel.** `subseq_viterbi` still reads it (`hmm.pyx`) to find the repeat matcher;
+  `viterbi()` used to as well, for two variables (`repeat_start_index`/
+  `repeat_end_index`) never read again afterward -- Task 6 found and deleted that dead
+  block. `subModels` is `cdef list`, and this file's `boundscheck=False` plus that
+  method's own `@cython.wraparound(False)` make Cython emit the unchecked
+  `PyList_GET_ITEM` for it, so indexing past the end reads adjacent memory instead of
+  raising. Every real MUC1 model has >= 2 subModels (prefix/repeat/suffix,
+  concatenated), so this never fires in production; a single-subModel synthetic test
+  model is what surfaces it (task-6-report.md).
 
 ## Never
 

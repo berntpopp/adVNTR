@@ -308,5 +308,121 @@ class TestBakeRejectsANonSilentFinalRelaxationSource(unittest.TestCase):
         self.assertTrue(model.is_baked)
 
 
+class TestSourceNoLongerUsesThePerAttemptGilBoundPatterns(unittest.TestCase):
+    """Task 6: per-attempt score-table allocation, dict-based sequence encoding, and
+    the O(n^2) `vpath.insert(0, ...)` traceback all held the GIL every decode attempt.
+    Reading the SOURCE (not just behaviour) is deliberate: a new path added beside a
+    still-present old one would pass any behavioural test while leaving the GIL-bound
+    cost exactly where it was. Written and run BEFORE the implementation
+    (task-6-report.md Steps 1-2): all three assertions below FAIL against the
+    pre-Task-6 source, each for the reason its own message names, not by accident.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'hmm', 'hmm.pyx')
+        with open(path) as handle:
+            cls.source = handle.read()
+        cls.viterbi_body = cls.source[cls.source.index('cpdef tuple viterbi(self, sequence):'):]
+
+    def test_sequence_encoding_is_not_a_dict_lookup(self):
+        self.assertNotIn("{'A':0", self.source,
+                         'get_encoded_sequence still keys a dict by base letter')
+
+    def test_traceback_does_not_insert_at_position_zero(self):
+        self.assertNotIn('insert(0,', self.viterbi_body,
+                         'viterbi() still rebuilds vpath with O(n^2) insert(0, ...)')
+
+    def test_viterbi_does_not_allocate_a_fresh_score_table_per_call(self):
+        self.assertNotIn('np.full((self.n_states, 2)', self.viterbi_body,
+                         'viterbi() still allocates dynamic_table fresh every attempt '
+                         'instead of reusing per-thread scratch')
+
+
+class TestEncodedSequenceStillRaisesOnAnUndeclaredSymbol(unittest.TestCase):
+    """get_encoded_sequence's KeyError on an undeclared symbol is load-bearing: bake()
+    already refuses a model whose emitting states do not declare all of A/C/G/T,
+    precisely so an undeclared symbol stays a loud failure and not a silent 0
+    (hmm.pyx's bake() comment). The 256-entry LUT (Task 6) must keep raising it."""
+
+    def test_an_n_raises_key_error(self):
+        model = Model(name='t6-lut-guard')
+        self.assertRaises(KeyError, model.get_encoded_sequence, 'N')
+
+
+class TestBakeAssertsTheRowIdentity(unittest.TestCase):
+    """viterbi()'s traceback (Task 6) uses a row it already has as its own index
+    instead of re-deriving it through state_to_index[states[row]] -- sound only
+    because bake() builds state_to_index as the plain positional inverse of states.
+    A state object appended TWICE breaks that: dict construction keeps only the
+    LATER pair for a repeated key, so the EARLIER position's row no longer matches --
+    proving the new guard has teeth, not merely that it exists."""
+
+    def test_bake_raises_when_a_state_is_duplicated_in_the_list(self):
+        # All-silent chain start->a->b->dup->end, so this trips ONLY the new
+        # identity check -- not the pre-existing "states[n_states-2] must be
+        # silent" one (n_states-2 lands on dup, itself silent) or the self-loop
+        # one (no state neighbours itself).
+        model = Model(name='t6-row-identity-guard')
+        a = State(None, name='a')
+        b = State(None, name='b')
+        dup = State(None, name='dup')
+        model.add_state(a)
+        model.add_state(dup)
+        model.add_state(b)
+        model.add_state(dup)  # same State object, appended a second time
+        model.set_transition(model.start, a, 1.0)
+        model.set_transition(a, b, 1.0)
+        model.set_transition(b, dup, 1.0)
+        model.set_transition(dup, model.end, 1.0)
+
+        self.assertRaises(ValueError, model.bake, sort_by_name=True)
+
+
+@has_fixtures
+class TestPerThreadScratchAcrossDifferentModelShapesOnOneThread(unittest.TestCase):
+    """_thread_scratch (Task 6) must grow or re-key, never alias, when the SAME
+    thread decodes two differently shaped models -- different n_states AND a
+    different max sequence length. Tier 3 always decodes one model repeatedly, so it
+    cannot see this failure mode; this test drives both shapes on one thread,
+    interleaved, and checks each against its own reference from before any
+    interleaving happened.
+
+    A one-subModel model is deliberate, not merely minimal: it SEGFAULTS on
+    pre-Task-6 viterbi() (`self.subModels[1]` under file-wide boundscheck=False,
+    unchecked list indexing on a length-1 list), because repeat_start_index/
+    repeat_end_index are computed from it and never used again -- confirmed dead by
+    grepping the method body -- which Task 6 deletes along with the rest of the
+    per-attempt work it does not need (task-6-report.md). Do not run this test
+    against pre-Task-6 hmm.pyx: the crash takes the whole test process down, the
+    same class of danger as the hang task-5-report.md documents.
+    """
+
+    def test_interleaving_two_model_shapes_matches_each_ones_own_reference(self):
+        big_model, _fp, _score = _ModelCache(MODELS).get('hg19', 151)
+        big_read = _first_fixture('hg19@151')
+
+        # Emitting 'a' then silent 'z': n_states-2 lands on 'z', satisfying bake()'s
+        # existing "final relaxation source must be silent" check.
+        small_model = Model(name='t6-scratch-shape-guard')
+        dist = DiscreteDistribution({'A': 0.25, 'C': 0.25, 'G': 0.25, 'T': 0.25})
+        a, z = State(dist, name='a'), State(None, name='z')
+        small_model.add_state(a)
+        small_model.add_state(z)
+        small_model.set_transition(small_model.start, a, 1.0)
+        small_model.set_transition(a, z, 1.0)
+        small_model.set_transition(z, small_model.end, 1.0)
+        small_model.bake(sort_by_name=True)
+        small_read = 'A'
+
+        big_reference = big_model.viterbi(big_read)
+        small_reference = small_model.viterbi(small_read)
+
+        for _ in range(5):
+            self.assertEqual(small_model.viterbi(small_read), small_reference)
+            self.assertEqual(big_model.viterbi(big_read), big_reference)
+
+
 if __name__ == '__main__':
     unittest.main()

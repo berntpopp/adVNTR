@@ -14,7 +14,7 @@ NEW_FILE_LIMIT = 650
 GRANDFATHERED = {
     'advntr/plot.py': 1445,
     'advntr/vntr_finder.py': 1406,
-    'hmm/hmm.pyx': 712,
+    'hmm/hmm.pyx': 694,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
     # each `include` this file, so it is hand-maintained exactly like hmm.pyx is, and
@@ -24,7 +24,10 @@ GRANDFATHERED = {
     # fix round 2, Finding A). Grandfathered, not on the new-file limit, because it is
     # the direct continuation of hmm.pyx's own DP body, not a new module. Task 4
     # deleted `vpath_table_col` from both files (913 -> 911 combined); ceilings lowered
-    # to match (713 -> 712, 200 -> 199).
+    # to match (713 -> 712, 200 -> 199). Task 6 (per-thread scratch, an off-GIL
+    # traceback, a LUT encoder) touches only hmm.pyx (712 -> 694, funded by deleting
+    # Model.log_probability plus condensing inherited docstring prose, task-6-report.md);
+    # this file is untouched, still 199.
     'hmm/_viterbi_fill_core.pxi': 199,
 }
 
