@@ -10,7 +10,7 @@ from .base cimport State
 
 import numpy as np
 cimport numpy as np
-from libc.math cimport log
+from libc.math cimport log, INFINITY
 from libc.stdlib cimport malloc, realloc, free
 
 cimport cython
@@ -618,12 +618,10 @@ cdef class Model(object):
         :return: log probability and viterbi path
 
         Production only -- no counters, no dp_tables, no skip_enabled toggle. That
-        instrumentation now lives entirely in hmm.hmm_instrumented (test-only,
-        decode_instrumented()), a SEPARATE compiled extension built from the same
+        instrumentation lives entirely in hmm.hmm_instrumented (test-only,
+        decode_instrumented()), a SEPARATE extension built from the same
         _viterbi_fill_core.pxi with DEF INSTRUMENTED = True, so it costs this module
-        nothing -- not a guard, not a branch, not a parameter. See that module and
-        _viterbi_fill_core.pxi for why a runtime guard was rejected (Task 3 fix round 1;
-        task-3-report.md).
+        nothing (Task 3 fix round 1; task-3-report.md).
         """
         if not self.is_baked:
             raise ValueError("ERROR: To call viterbi, the model must have been baked")
@@ -638,7 +636,8 @@ cdef class Model(object):
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
 
-        cdef double[::1,:] dynamic_table = np.full((self.n_states, sequence_length + 1), -np.inf, dtype=np.double, order='F')
+        # Rolled to 2 columns, parity-addressed inside _viterbi_fill: 3.12 MB -> 41 KB/call (task-5-report.md).
+        cdef double[::1,:] dynamic_table = np.full((self.n_states, 2), -np.inf, dtype=np.double, order='F')
         dynamic_table[self.state_to_index[self.start]][0] = log(1)
 
         # Predecessor row only -- column is derived at traceback time, not stored.
@@ -667,6 +666,7 @@ cdef class Model(object):
 
         # For the last update
         col = sequence_length
+        cdef int col_phys = col & 1  # physical index into the rolled table, not the logical column
         state = self.states[self.n_states-2]
         row = self.state_to_index[state]
 
@@ -674,10 +674,10 @@ cdef class Model(object):
         cdef double log_prob = 0
         neighbor_indices = self.neighbors[state]
         for neighbor_state_index in neighbor_indices:
-            log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index]
+            log_prob = dynamic_table[row][col_phys] + self.transition_matrix[row][neighbor_state_index]
 
-            if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-                dynamic_table[neighbor_state_index][col] = log_prob
+            if log_prob - dynamic_table[neighbor_state_index][col_phys] > 1e-10:
+                dynamic_table[neighbor_state_index][col_phys] = log_prob
                 vpath_table_row[neighbor_state_index][col] = row
 
         # Back tracking viterbi path from the Prefix Matcher End
@@ -687,7 +687,7 @@ cdef class Model(object):
         vpath.insert(0, (end_index, self.subModels[self.n_subModels-1].end))
         row, col = vpath_table_row[end_index][sequence_length], (sequence_length if silent[vpath_table_row[end_index][sequence_length]] else sequence_length - 1)
 
-        cdef double logp = dynamic_table[self.state_to_index[self.subModels[self.n_subModels-1].end]][sequence_length]
+        cdef double logp = dynamic_table[end_index][col_phys]
         if logp == -np.inf:  # no path with satisfying the threshold
             return logp, vpath
 

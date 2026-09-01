@@ -24,42 +24,37 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
 
     ONE hand-maintained source, compiled TWICE: hmm/hmm.pyx and hmm/hmm_instrumented.pyx
     each `include` this file after setting a different `DEF INSTRUMENTED`, producing two
-    independent extension modules rather than one module with a runtime guard. That
-    distinction is load-bearing, not stylistic -- a `counters != NULL` check directly in
-    front of each `counters[i] += 1`, always false in production, still measured
-    4.2-4.5% on the real pristine-vs-final benchmark (Task 3 fix round 1;
-    task-3-report.md), because a per-event branch inside a nogil loop this hot never
-    gets close to the ~1% budget, no matter how the branch is written. `INSTRUMENTED =
-    False` (hmm.hmm, production, hmm/__init__.py's only import) deletes every counting
-    site and the `skip_enabled` gate at COMPILE time -- not <1%, not in the generated C
-    at all -- and the pop-time skip is unconditional, exactly as originally shipped.
-    `INSTRUMENTED = True` (hmm.hmm_instrumented, test-only, never imported by production)
-    compiles the counters in and adds the `skip_enabled` runtime flag so a test can run
-    the identical fill with the skip forced off (see decode_instrumented in
-    hmm_instrumented.pyx) -- a runtime branch is free to add there, because production
-    never links this module in at all.
+    independent extension modules rather than one module with a runtime guard -- a
+    `counters != NULL` check in front of each `counters[i] += 1`, always false in
+    production, still measured 4.2-4.5% on the pristine-vs-final benchmark (Task 3 fix
+    round 1; task-3-report.md), over the ~1% budget no matter how the branch is written.
+    `INSTRUMENTED = False` (hmm.hmm, production, hmm/__init__.py's only import) deletes
+    every counting site and the `skip_enabled` gate at COMPILE time; `INSTRUMENTED = True`
+    (hmm.hmm_instrumented, test-only, never imported by production) compiles them in, plus
+    a runtime `skip_enabled` flag so a test can run the identical fill with the skip
+    forced off (decode_instrumented in hmm_instrumented.pyx).
 
     `counters`, when not NULL, is a caller-allocated int[4]:
     [pops, noop_pops, edge_relaxations, successful_writes]. `noop_pops` counts pops that
     REACHED the edge loop despite reading an unchanged cell -- the wasted work the skip
     eliminates -- not every pop matching that condition. Under `skip_enabled=True` that
-    is exactly 0 by construction: such a pop `continue`s before the counting site is
-    ever reached, it is not skipped by a runtime check on the counter. Under
-    `skip_enabled=False` every one of those pops falls through into the counting site
-    instead, reproducing the 41.8%/46.6% measured with the skip's own condition
+    is exactly 0 by construction (the pop `continue`s before the counting site), and
+    under `skip_enabled=False` every one of those pops falls through into the counting
+    site instead, reproducing the 41.8%/46.6% measured with the skip's own condition
     evaluated but not acted on.
 
     No `vpath_table_col`: predecessor column of `vpath_table_row[r,c]` is `c if silent[row] else c-1` (task-4-report.md: 0 violations/1,041,573 cells).
+
+    Score scratch (production only) is TWO rolling columns addressed by `col & 1`/`next_col & 1`, reset to -inf EVERY iteration -- even one about to `break` -- because the un-enqueued final relaxation (hmm.pyx) reads column `sequence_length` by name and must see -inf, not 2-columns-stale data, after an early break (task-5-report.md). `vpath_table_row` stays full-size and unreset: the traceback walks it, and every cell it reads was written by the relaxation that produced that path.
     """
-    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end, n_states
+    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end, n_states, col_idx, next_col_idx
     cdef double log_prob, emission, current
     IF INSTRUMENTED:
         cdef bint is_noop
 
-    # Two array-backed FIFOs replacing the linked-list Queue, whose queue_push_tail
-    # malloc'd a 24-byte node per relaxation (~1.5M malloc/free pairs per call).
-    # Push at tail, pop at head, never wrap: byte-for-byte the same visit ORDER the
-    # linked list produced. Order is load-bearing -- the relaxation guard is
+    # Two array-backed FIFOs replacing the linked-list Queue's 24-byte malloc/free per
+    # relaxation (~1.5M pairs/call). Push at tail, pop at head, never wrap: same visit
+    # ORDER the linked list produced -- load-bearing, since the relaxation guard is
     # `> 1e-10`, not `> 0`, so this is not an order-independent fixpoint and a LIFO
     # would silently change vpath.
     cdef int cur_cap = 4096, nxt_cap = 4096
@@ -77,9 +72,8 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
 
     # Per-call scratch for the pop-time duplicate skip below, sized n_states. A state
     # can be pushed more than once per column (once per improving relaxation into it),
-    # but its cell is only read at POP time -- so a row popped twice at the same
-    # column with an unchanged value is redoing work already done. `last_col` inits
-    # to -1, and a real column is never negative, so no separate "seen" flag is needed.
+    # but its cell is only read at POP time, so a row popped twice with an unchanged
+    # value redoes work already done. `last_col` inits to -1 (a real column never is).
     n_states = dynamic_table.shape[0]
     cdef double* last_val = <double*> malloc(n_states * sizeof(double))
     cdef int* last_col = <int*> malloc(n_states * sizeof(int))
@@ -103,11 +97,17 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
         nxt_head = 0
         nxt_tail = 0
 
+        next_col = col + 1
+        IF INSTRUMENTED:
+            col_idx, next_col_idx = col, next_col
+        ELSE:
+            col_idx, next_col_idx = col & 1, next_col & 1
+            for row in range(n_states): dynamic_table[row, next_col_idx] = -INFINITY
+
         if cur_head == cur_tail:
             break
 
         ch = encoded_sequence[col]
-        next_col = col + 1
 
         while cur_head < cur_tail:
             row = cur[cur_head]
@@ -117,7 +117,7 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                     counters[0] += 1
             start = indptr[row]
             end = indptr[row + 1]
-            current = dynamic_table[row, col]
+            current = dynamic_table[row, col_idx]
 
             IF INSTRUMENTED:
                 # last_col[row]/last_val[row] update either way -- see the module
@@ -146,7 +146,7 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                             counters[2] += 1
                     log_prob = current + weights[k]
 
-                    if log_prob - dynamic_table[neighbor_state_index, col] > 1e-10 and log_prob >= threshold:
+                    if log_prob - dynamic_table[neighbor_state_index, col_idx] > 1e-10 and log_prob >= threshold:
                         IF INSTRUMENTED:
                             if counters != NULL:
                                 counters[3] += 1
@@ -162,7 +162,7 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                             cur_cap *= 2
                         cur[cur_tail] = neighbor_state_index
                         cur_tail += 1
-                        dynamic_table[neighbor_state_index, col] = log_prob
+                        dynamic_table[neighbor_state_index, col_idx] = log_prob
                         vpath_table_row[neighbor_state_index, col] = row
             else:  # Emitting state: consume a character and advance a column
                 emission = emissions[row, ch]
@@ -173,7 +173,7 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                             counters[2] += 1
                     log_prob = current + weights[k] + emission
 
-                    if log_prob - dynamic_table[neighbor_state_index, next_col] > 1e-10 and log_prob >= threshold:
+                    if log_prob - dynamic_table[neighbor_state_index, next_col_idx] > 1e-10 and log_prob >= threshold:
                         IF INSTRUMENTED:
                             if counters != NULL:
                                 counters[3] += 1
@@ -189,7 +189,7 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                             nxt_cap *= 2
                         nxt[nxt_tail] = neighbor_state_index
                         nxt_tail += 1
-                        dynamic_table[neighbor_state_index, next_col] = log_prob
+                        dynamic_table[neighbor_state_index, next_col_idx] = log_prob
                         vpath_table_row[neighbor_state_index, next_col] = row
 
     free(cur)

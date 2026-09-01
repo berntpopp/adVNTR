@@ -137,6 +137,27 @@ class TestDecoderWorkload(unittest.TestCase):
         counters = decode_with_counters(self.model, self.read)
         self.assertGreater(counters['edge_relaxations'], counters['successful_writes'])
 
+    def test_early_break_leaves_the_final_column_at_negative_infinity(self):
+        """Task 5's Step 1: synthesises the early-break case the real corpus never
+        hits (0 of 800 attempts empty the queue before the final column). Raising
+        `dp_score_threshold` to -23.0 makes the fill stop writing after column 10
+        of 151 -- confirmed via decode_instrumented's dp_tables against this same
+        fixture, and NOT a threshold so extreme nothing is ever written (column 10
+        still gets 14,451 successful writes; the per-column max decays
+        monotonically from -21.72 at column 10 to -25.30 at column 11, so -23.0
+        blocks column 11 specifically). Pins today's full-table behaviour --
+        column `sequence_length`, never reached, stays -inf from its initial
+        allocation -- so a rolled two-column implementation cannot silently
+        surface stale finite data under that name instead.
+        """
+        original = self.model.dp_score_threshold
+        self.model.dp_score_threshold = -23.0
+        try:
+            logp, _vpath = self.model.viterbi(self.read)
+        finally:
+            self.model.dp_score_threshold = original
+        self.assertEqual(logp, float('-inf'))
+
     def test_predecessor_column_matches_the_relaxation_that_wrote_each_cell(self):
         """Task 4 deleted `vpath_table_col`: a silent source always relaxes
         in-column and an emitting source always into the next column, so a written
