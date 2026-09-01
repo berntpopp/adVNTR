@@ -18,6 +18,8 @@ are paired. Carrier and control outcomes are always tested separately.
 Reports contain sample identifiers only outside the repository. ``--out`` and
 ``ADVNTR_BENCH_OUT`` name an output directory; otherwise the directory is
 ``~/.cache/advntr-bench``. The published file is ``accuracy-report.json``.
+Every stratified metric carries its own interpretation marker, based on that
+caller's metric denominator rather than the stratum's total size.
 """
 from __future__ import division
 
@@ -25,6 +27,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -67,10 +70,12 @@ def wilson_ci(successes, total, confidence=0.95):
         raise ValueError('successes cannot exceed total')
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise TypeError('confidence must be numeric')
+    if math.isnan(confidence) or math.isinf(confidence):
+        raise ValueError('confidence must be finite')
     if confidence <= 0.0 or confidence >= 1.0:
         raise ValueError('confidence must be between zero and one')
 
-    z_value = float(norm.ppf(1.0 - (1.0 - confidence) / 2.0))
+    z_value = float(norm.isf((1.0 - confidence) / 2.0))
     proportion = successes / total
     z_squared = z_value * z_value
     denominator = 1.0 + z_squared / total
@@ -157,7 +162,7 @@ def _validate_records(records, compare):
     return validated
 
 
-def _one_metric(successes, total):
+def _one_metric(successes, total, mark_interpretation=False):
     result = {'numerator': successes, 'denominator': total}
     if total:
         result['estimate'] = successes / total
@@ -165,10 +170,14 @@ def _one_metric(successes, total):
     else:
         result['estimate'] = None
         result['ci95'] = None
+    if mark_interpretation:
+        result['interpretation'] = (
+            'interpreted' if total >= STRATUM_INTERPRETATION_MINIMUM
+            else 'report_only')
     return result
 
 
-def _metrics(records, call_field):
+def _metrics(records, call_field, mark_interpretation=False):
     true_positive = sum(1 for record in records
                         if record['truth'] and record[call_field])
     false_negative = sum(1 for record in records
@@ -179,18 +188,24 @@ def _metrics(records, call_field):
                          if not record['truth'] and record[call_field])
     return {
         'sensitivity': _one_metric(true_positive,
-                                   true_positive + false_negative),
+                                   true_positive + false_negative,
+                                   mark_interpretation),
         'specificity': _one_metric(true_negative,
-                                   true_negative + false_positive),
-        'ppv': _one_metric(true_positive, true_positive + false_positive),
-        'npv': _one_metric(true_negative, true_negative + false_negative),
+                                   true_negative + false_positive,
+                                   mark_interpretation),
+        'ppv': _one_metric(true_positive, true_positive + false_positive,
+                           mark_interpretation),
+        'npv': _one_metric(true_negative, true_negative + false_negative,
+                           mark_interpretation),
     }
 
 
-def _metrics_by_caller(records, compare):
-    metrics = {'baseline': _metrics(records, 'baseline_call')}
+def _metrics_by_caller(records, compare, mark_interpretation=False):
+    metrics = {'baseline': _metrics(
+        records, 'baseline_call', mark_interpretation)}
     if compare:
-        metrics['candidate'] = _metrics(records, 'candidate_call')
+        metrics['candidate'] = _metrics(
+            records, 'candidate_call', mark_interpretation)
     return metrics
 
 
@@ -202,10 +217,8 @@ def _stratify(records, field, compare):
         result.append({
             'value': value,
             'n': len(members),
-            'interpretation': ('interpreted'
-                               if len(members) >= STRATUM_INTERPRETATION_MINIMUM
-                               else 'report_only'),
-            'metrics': _metrics_by_caller(members, compare),
+            'metrics': _metrics_by_caller(
+                members, compare, mark_interpretation=True),
         })
     return result
 
@@ -314,27 +327,71 @@ def load_records(path):
     return records
 
 
+def _repository_boundaries():
+    """Return every worktree and the common Git directory, or fail closed."""
+    try:
+        worktree_output = subprocess.check_output(
+            ['git', 'worktree', 'list', '--porcelain', '-z'], cwd=REPO_ROOT)
+        common_git = subprocess.check_output(
+            ['git', 'rev-parse', '--git-common-dir'], cwd=REPO_ROOT).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError('cannot establish repository output boundaries: %s'
+                         % error)
+    worktrees = [field[len('worktree '):]
+                 for field in worktree_output.split('\0')
+                 if field.startswith('worktree ')]
+    if not worktrees or not common_git:
+        raise ValueError('cannot establish repository output boundaries')
+    if not os.path.isabs(common_git):
+        common_git = os.path.join(REPO_ROOT, common_git)
+    boundaries = worktrees + [common_git]
+    return tuple(sorted(set(os.path.realpath(path) for path in boundaries)))
+
+
+def _path_is_within(path, boundary):
+    boundary_prefix = boundary.rstrip(os.sep) + os.sep
+    return path == boundary or path.startswith(boundary_prefix)
+
+
 def _resolved_external_path(path):
     resolved = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
-    if resolved == REPO_ROOT or resolved.startswith(REPO_ROOT + os.sep):
-        raise ValueError('output path must be outside the repository: %s' % path)
+    for boundary in _repository_boundaries():
+        if _path_is_within(resolved, boundary):
+            raise ValueError('output path must be outside Git storage: %s' % path)
     return resolved
 
 
-def publish_report(report, output_dir):
-    """Atomically publish deterministic JSON and return its resolved path."""
+def publish_report(report, output_dir, records_path=None):
+    """Publish through a revalidated directory descriptor, never a checked name."""
     resolved_dir = _resolved_external_path(output_dir)
+    created_dir = False
+    created_identity = None
     if not os.path.exists(resolved_dir):
         os.makedirs(resolved_dir, 0o700)
+        created_dir = True
+        created_stat = os.stat(resolved_dir)
+        created_identity = (created_stat.st_dev, created_stat.st_ino)
     if not os.path.isdir(resolved_dir):
         raise ValueError('output path is not a directory: %s' % output_dir)
-    resolved_dir = _resolved_external_path(resolved_dir)
-    output_path = os.path.join(resolved_dir, OUTPUT_NAME)
-    _resolved_external_path(output_path)
-
-    descriptor, temporary_path = tempfile.mkstemp(
-        prefix='.accuracy-report-', suffix='.json', dir=resolved_dir)
+    directory_fd = None
+    temporary_path = None
+    published = False
+    cleanup_dir = None
     try:
+        open_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+        directory_fd = os.open(resolved_dir, open_flags)
+        anchored_dir = '/proc/self/fd/%d' % directory_fd
+        _resolved_external_path(anchored_dir)
+        output_path = os.path.join(anchored_dir, OUTPUT_NAME)
+        resolved_output = _resolved_external_path(output_path)
+        if records_path is not None:
+            resolved_records = os.path.realpath(os.path.abspath(
+                os.path.expanduser(records_path)))
+            if resolved_records == resolved_output:
+                raise ValueError('records path collides with final report destination')
+
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix='.accuracy-report-', suffix='.json', dir=anchored_dir)
         with os.fdopen(descriptor, 'w') as handle:
             json.dump(report, handle, sort_keys=True, indent=2,
                       separators=(',', ': '))
@@ -342,11 +399,34 @@ def publish_report(report, output_dir):
             handle.flush()
             os.fsync(handle.fileno())
         os.rename(temporary_path, output_path)
-    except Exception:
-        if os.path.exists(temporary_path):
-            os.unlink(temporary_path)
+        temporary_path = None
+        published_path = os.path.realpath(output_path)
+        published = True
+        return published_path
+    except BaseException:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
         raise
-    return output_path
+    finally:
+        if directory_fd is not None:
+            if created_dir and not published:
+                cleanup_dir = os.path.realpath('/proc/self/fd/%d' % directory_fd)
+            os.close(directory_fd)
+        elif created_dir and not published:
+            try:
+                current_stat = os.stat(resolved_dir)
+                if (current_stat.st_dev, current_stat.st_ino) == created_identity:
+                    cleanup_dir = resolved_dir
+            except OSError:
+                pass
+        if cleanup_dir is not None:
+            try:
+                os.rmdir(cleanup_dir)
+            except OSError:
+                pass
 
 
 def main(argv=None):
@@ -361,7 +441,7 @@ def main(argv=None):
     try:
         records = load_records(args.records)
         report = build_report(records, compare=args.mode == 'compare')
-        publish_report(report, output_dir)
+        publish_report(report, output_dir, records_path=args.records)
     except (IOError, OSError, TypeError, ValueError) as error:
         parser.error(str(error))
     return 0

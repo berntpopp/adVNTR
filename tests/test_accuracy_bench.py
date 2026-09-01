@@ -1,7 +1,9 @@
 """Behavioral tests for the external-only accuracy benchmark harness."""
+import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,21 @@ def _record(sample_id, truth, baseline, candidate=None,
     if candidate is not None:
         record['candidate_call'] = candidate
     return record
+
+
+def _registered_worktrees():
+    output = subprocess.check_output(
+        ['git', 'worktree', 'list', '--porcelain', '-z'], cwd=REPO)
+    return [os.path.realpath(field[len('worktree '):])
+            for field in output.split('\0') if field.startswith('worktree ')]
+
+
+def _common_git_directory():
+    path = subprocess.check_output(
+        ['git', 'rev-parse', '--git-common-dir'], cwd=REPO).strip()
+    if not os.path.isabs(path):
+        path = os.path.join(REPO, path)
+    return os.path.realpath(path)
 
 
 class _TemporaryDirectoryTest(unittest.TestCase):
@@ -72,6 +89,18 @@ class TestWilsonInterval(_TemporaryDirectoryTest):
         for successes, total in invalid:
             with self.assertRaises((TypeError, ValueError)):
                 bench.wilson_ci(successes, total)
+
+    def test_near_one_confidence_uses_a_finite_non_collapsed_interval(self):
+        bench = self.require_module()
+        lower, upper = bench.wilson_ci(10, 10, 1.0 - 1e-16)
+        self.assertAlmostEqual(lower, 0.12696276142998747, places=14)
+        self.assertEqual(upper, 1.0)
+
+    def test_wilson_rejects_non_finite_confidence(self):
+        bench = self.require_module()
+        for confidence in (float('nan'), float('inf'), float('-inf')):
+            with self.assertRaises(ValueError):
+                bench.wilson_ci(1, 2, confidence)
 
 
 class TestMcNemarExact(_TemporaryDirectoryTest):
@@ -141,19 +170,27 @@ class TestAccuracyReport(_TemporaryDirectoryTest):
         self.assertEqual(candidate['sensitivity']['denominator'], 11)
         self.assertEqual(candidate['specificity']['numerator'], 1)
         self.assertEqual(candidate['specificity']['denominator'], 11)
-        self.assertIn('ppv', candidate)
-        self.assertIn('npv', candidate)
+        self.assertEqual((baseline['ppv']['numerator'],
+                          baseline['ppv']['denominator']), (11, 11))
+        self.assertEqual((baseline['npv']['numerator'],
+                          baseline['npv']['denominator']), (11, 11))
+        self.assertEqual((candidate['ppv']['numerator'],
+                          candidate['ppv']['denominator']), (1, 11))
+        self.assertEqual((candidate['npv']['numerator'],
+                          candidate['npv']['denominator']), (1, 11))
 
         class_strata = report['strata']['variant_class']
-        self.assertEqual([(item['value'], item['n'], item['interpretation'])
-                          for item in class_strata],
-                         [('deletion', 2, 'report_only'),
-                          ('duplication', 20, 'interpreted')])
+        self.assertEqual([(item['value'], item['n']) for item in class_strata],
+                         [('deletion', 2), ('duplication', 20)])
         length_strata = report['strata']['array_length']
-        self.assertEqual([(item['value'], item['n'], item['interpretation'])
-                          for item in length_strata],
-                         [(30, 20, 'interpreted'),
-                          (41, 2, 'report_only')])
+        self.assertEqual([(item['value'], item['n']) for item in length_strata],
+                         [(30, 20), (41, 2)])
+        for stratum in class_strata + length_strata:
+            self.assertNotIn('interpretation', stratum)
+            for caller_metrics in stratum['metrics'].values():
+                for metric in caller_metrics.values():
+                    self.assertIn(metric['interpretation'],
+                                  ('interpreted', 'report_only'))
 
         discordances = report['comparison']['discordances']
         self.assertEqual(len(discordances), 20)
@@ -175,6 +212,119 @@ class TestAccuracyReport(_TemporaryDirectoryTest):
         self.assertTrue(decision['specificity_fell'])
         self.assertTrue(
             decision['candidate_sensitivity_lower_ci_below_baseline_point'])
+
+    def test_stratum_interpretation_uses_each_callers_metric_denominator(self):
+        bench = self.require_module()
+        records = []
+        for index in range(5):
+            records.append(_record('carrier-%02d' % index,
+                                   True, True, False))
+        for index in range(15):
+            records.append(_record('control-%02d' % index,
+                                   False, True, False))
+
+        stratum = bench.build_report(
+            records, compare=True)['strata']['variant_class'][0]
+        self.assertEqual(stratum['n'], 20)
+        self.assertNotIn('interpretation', stratum)
+        baseline = stratum['metrics']['baseline']
+        candidate = stratum['metrics']['candidate']
+        self.assertEqual((baseline['sensitivity']['denominator'],
+                          baseline['sensitivity']['interpretation']),
+                         (5, 'report_only'))
+        self.assertEqual((baseline['specificity']['denominator'],
+                          baseline['specificity']['interpretation']),
+                         (15, 'report_only'))
+        self.assertEqual((baseline['ppv']['denominator'],
+                          baseline['ppv']['interpretation']),
+                         (20, 'interpreted'))
+        self.assertEqual((baseline['npv']['denominator'],
+                          baseline['npv']['interpretation']),
+                         (0, 'report_only'))
+        self.assertEqual((candidate['sensitivity']['denominator'],
+                          candidate['sensitivity']['interpretation']),
+                         (5, 'report_only'))
+        self.assertEqual((candidate['specificity']['denominator'],
+                          candidate['specificity']['interpretation']),
+                         (15, 'report_only'))
+        self.assertEqual((candidate['ppv']['denominator'],
+                          candidate['ppv']['interpretation']),
+                         (0, 'report_only'))
+        self.assertEqual((candidate['npv']['denominator'],
+                          candidate['npv']['interpretation']),
+                         (20, 'interpreted'))
+
+    def test_every_discordance_direction_and_cause_mapping_is_exact(self):
+        bench = self.require_module()
+        records = [
+            _record('a-new-false-negative', True, True, False),
+            _record('b-new-false-positive', False, False, True),
+            _record('c-fixed-false-negative', True, False, True),
+            _record('d-fixed-false-positive', False, True, False),
+        ]
+        discordances = bench.build_report(
+            records, compare=True)['comparison']['discordances']
+        self.assertEqual(discordances, [
+            {'sample_id': 'a-new-false-negative', 'truth': True,
+             'baseline_call': True, 'candidate_call': False,
+             'variant_class': 'duplication', 'array_length': 30,
+             'direction': 'baseline_correct_to_candidate_incorrect',
+             'cause': 'candidate_false_negative'},
+            {'sample_id': 'b-new-false-positive', 'truth': False,
+             'baseline_call': False, 'candidate_call': True,
+             'variant_class': 'duplication', 'array_length': 30,
+             'direction': 'baseline_correct_to_candidate_incorrect',
+             'cause': 'candidate_false_positive'},
+            {'sample_id': 'c-fixed-false-negative', 'truth': True,
+             'baseline_call': False, 'candidate_call': True,
+             'variant_class': 'duplication', 'array_length': 30,
+             'direction': 'baseline_incorrect_to_candidate_correct',
+             'cause': 'candidate_fixed_false_negative'},
+            {'sample_id': 'd-fixed-false-positive', 'truth': False,
+             'baseline_call': True, 'candidate_call': False,
+             'variant_class': 'duplication', 'array_length': 30,
+             'direction': 'baseline_incorrect_to_candidate_correct',
+             'cause': 'candidate_fixed_false_positive'},
+        ])
+
+    def test_duplicate_sample_ids_are_rejected(self):
+        bench = self.require_module()
+        with self.assertRaises(ValueError):
+            bench.build_report([
+                _record('duplicate', True, True),
+                _record('duplicate', False, False),
+            ])
+
+    def test_candidate_field_is_forbidden_in_baseline_mode(self):
+        bench = self.require_module()
+        with self.assertRaises(ValueError):
+            bench.build_report([
+                _record('carrier', True, True, True),
+                _record('control', False, False, False),
+            ], compare=False)
+
+    def test_malformed_record_field_types_are_rejected(self):
+        bench = self.require_module()
+        malformed = []
+        for field, value in [('sample_id', 1), ('truth', 1),
+                             ('baseline_call', 0), ('variant_class', 1),
+                             ('array_length', 30.5), ('array_length', True)]:
+            record = _record('malformed-%s-%d' % (field, len(malformed)),
+                             True, True)
+            record[field] = value
+            malformed.append(record)
+        for record in malformed:
+            with self.assertRaises((TypeError, ValueError)):
+                bench.build_report([
+                    record,
+                    _record('valid-control', False, False),
+                ])
+
+        with self.assertRaises(TypeError):
+            bench.build_report([
+                _record('carrier', True, True, candidate='yes'),
+                _record('control', False, False, candidate=False),
+            ], compare=True)
 
     def test_zero_prediction_denominator_is_reported_as_undefined(self):
         bench = self.require_module()
@@ -221,6 +371,181 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
             bench.publish_report({'mode': 'baseline'}, link)
         self.assertFalse(os.path.exists(forbidden))
 
+    def test_main_checkout_and_every_registered_worktree_are_refused(self):
+        bench = self.require_module()
+        worktrees = _registered_worktrees()
+        self.assertIn(os.path.realpath(REPO), worktrees)
+        for worktree in worktrees:
+            for path in (worktree, os.path.join(worktree, 'ignored-child')):
+                with self.assertRaises(ValueError):
+                    bench._resolved_external_path(path)
+
+    def test_containment_handles_multiple_roots_without_prefix_confusion(self):
+        bench = self.require_module()
+        self.assertTrue(hasattr(bench, '_path_is_within'),
+                        'containment must be independently testable')
+        roots = ('/synthetic/main', '/synthetic/linked')
+        for root in roots:
+            self.assertTrue(bench._path_is_within(root, root))
+            self.assertTrue(bench._path_is_within(
+                os.path.join(root, 'nested'), root))
+            self.assertFalse(bench._path_is_within(root + '-sibling', root))
+        self.assertTrue(bench._path_is_within('/synthetic', os.sep))
+
+    def test_common_git_metadata_directory_is_refused(self):
+        bench = self.require_module()
+        common_git = _common_git_directory()
+        self.assertTrue(os.path.isdir(common_git))
+        for path in (common_git, os.path.join(common_git, 'ignored-child')):
+            with self.assertRaises(ValueError):
+                bench._resolved_external_path(path)
+
+    def test_git_boundary_discovery_failure_refuses_publication(self):
+        bench = self.require_module()
+        self.assertTrue(hasattr(bench, 'subprocess'),
+                        'publication must discover Git boundaries')
+        real_check_output = bench.subprocess.check_output
+
+        def unavailable(*_args, **_kwargs):
+            raise OSError('synthetic git failure')
+
+        bench.subprocess.check_output = unavailable
+        try:
+            with self.assertRaises(ValueError):
+                bench.publish_report({'mode': 'baseline'}, self.tempdir)
+        finally:
+            bench.subprocess.check_output = real_check_output
+
+    def test_directory_substitution_cannot_redirect_publication(self):
+        bench = self.require_module()
+        external_parent = os.path.join(self.tempdir, 'race-anchor')
+        moved_parent = os.path.join(self.tempdir, 'race-anchor-moved')
+        external_output = os.path.join(external_parent, 'output')
+        os.makedirs(external_output)
+
+        ignored_root = os.path.join(REPO, '.superpowers', 'sdd')
+        repository_target = tempfile.mkdtemp(
+            prefix='accuracy-race-', dir=ignored_root)
+        os.mkdir(os.path.join(repository_target, 'output'))
+        repository_report = os.path.join(
+            repository_target, 'output', 'accuracy-report.json')
+        real_mkstemp = bench.tempfile.mkstemp
+        substituted = [False]
+
+        def substitute_before_create(*args, **kwargs):
+            if not substituted[0]:
+                os.rename(external_parent, moved_parent)
+                os.symlink(repository_target, external_parent)
+                substituted[0] = True
+            return real_mkstemp(*args, **kwargs)
+
+        try:
+            bench.tempfile.mkstemp = substitute_before_create
+            try:
+                published = bench.publish_report(
+                    {'mode': 'baseline'}, external_output)
+            finally:
+                bench.tempfile.mkstemp = real_mkstemp
+            self.assertTrue(substituted[0])
+            self.assertFalse(os.path.exists(repository_report))
+            self.assertTrue(os.path.isfile(published))
+            self.assertFalse(os.path.realpath(published).startswith(
+                os.path.realpath(REPO) + os.sep))
+        finally:
+            shutil.rmtree(repository_target)
+
+    def test_records_collision_is_refused_for_direct_and_symlink_paths(self):
+        self.require_module()
+        output_dir = os.path.join(self.tempdir, 'collision-output')
+        os.mkdir(output_dir)
+        output_path = os.path.join(output_dir, 'accuracy-report.json')
+        records = [
+            _record('collision-carrier', True, True),
+            _record('collision-control', False, False),
+        ]
+        original = ''.join(json.dumps(record, sort_keys=True) + '\n'
+                           for record in records)
+        with open(output_path, 'w') as handle:
+            handle.write(original)
+        records_link = os.path.join(self.tempdir, 'records-link.jsonl')
+        os.symlink(output_path, records_link)
+
+        for records_path in (output_path, records_link):
+            process = subprocess.Popen([
+                sys.executable, SCRIPT, '--records', records_path,
+                '--mode', 'baseline', '--out', output_dir,
+            ], cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _stdout, _stderr = process.communicate()
+            self.assertNotEqual(process.returncode, 0)
+            with open(output_path) as handle:
+                self.assertEqual(handle.read(), original)
+
+    def test_keyboard_interrupt_removes_temp_file_and_new_output_directory(self):
+        bench = self.require_module()
+        output_dir = os.path.join(self.tempdir, 'interrupted-output')
+        real_rename = bench.os.rename
+
+        def interrupt_rename(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+
+        bench.os.rename = interrupt_rename
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                bench.publish_report({'mode': 'baseline'}, output_dir)
+        finally:
+            bench.os.rename = real_rename
+        self.assertFalse(os.path.exists(output_dir))
+
+    def test_open_failure_removes_new_output_directory(self):
+        bench = self.require_module()
+        output_dir = os.path.join(self.tempdir, 'open-failure-output')
+        real_open = bench.os.open
+
+        def fail_open(*_args, **_kwargs):
+            raise OSError('synthetic open failure')
+
+        bench.os.open = fail_open
+        try:
+            with self.assertRaises(OSError):
+                bench.publish_report({'mode': 'baseline'}, output_dir)
+        finally:
+            bench.os.open = real_open
+        self.assertFalse(os.path.exists(output_dir))
+
+    def test_published_report_mode_is_owner_read_write_only(self):
+        bench = self.require_module()
+        output_dir = os.path.join(self.tempdir, 'private-output')
+        output_path = bench.publish_report({'mode': 'baseline'}, output_dir)
+        self.assertEqual(stat.S_IMODE(os.stat(output_path).st_mode), 0o600)
+
+    def test_cli_validation_failure_creates_no_report(self):
+        self.require_module()
+        records_path = os.path.join(self.tempdir, 'invalid-records.jsonl')
+        output_dir = os.path.join(self.tempdir, 'invalid-output')
+        with open(records_path, 'w') as handle:
+            handle.write(json.dumps(_record('carrier', True, True)) + '\n')
+            handle.write(json.dumps(_record('control', False, False)) + '\n')
+        process = subprocess.Popen([
+            sys.executable, SCRIPT, '--records', records_path,
+            '--mode', 'compare', '--out', output_dir,
+        ], cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _stdout, _stderr = process.communicate()
+        self.assertNotEqual(process.returncode, 0)
+        self.assertFalse(os.path.exists(
+            os.path.join(output_dir, 'accuracy-report.json')))
+
+    def test_repository_snapshot_detects_same_name_same_size_content_change(self):
+        probe_root = os.path.join(self.tempdir, 'snapshot-probe')
+        os.mkdir(probe_root)
+        probe_path = os.path.join(probe_root, 'probe.txt')
+        with open(probe_path, 'w') as handle:
+            handle.write('before')
+        before = self._repository_snapshot(probe_root)
+        with open(probe_path, 'w') as handle:
+            handle.write('after!')
+        after = self._repository_snapshot(probe_root)
+        self.assertNotEqual(after, before)
+
     def test_cli_writes_only_deterministic_json_outside_repository(self):
         self.require_module()
         records_path = os.path.join(self.tempdir, 'records.jsonl')
@@ -235,12 +560,12 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
             for record in records:
                 handle.write(json.dumps(record, sort_keys=True) + '\n')
 
-        before = self._repository_paths()
+        before = self._repository_snapshot()
         subprocess.check_call([
             sys.executable, SCRIPT, '--records', records_path,
             '--mode', 'compare', '--out', output_dir,
         ], cwd=REPO)
-        after = self._repository_paths()
+        after = self._repository_snapshot()
         self.assertEqual(after, before)
 
         output_path = os.path.join(output_dir, 'accuracy-report.json')
@@ -258,16 +583,29 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
             self.assertEqual(handle.read(), first_bytes)
 
     @staticmethod
-    def _repository_paths():
+    def _repository_snapshot(snapshot_root=REPO):
         paths = []
-        for root, dirs, files in os.walk(REPO):
+        for root, dirs, files in os.walk(snapshot_root):
             dirs[:] = sorted(name for name in dirs
                               if name not in ('.git', '.superpowers'))
-            relative_root = os.path.relpath(root, REPO)
+            relative_root = os.path.relpath(root, snapshot_root)
             paths.extend(('d', os.path.join(relative_root, name))
                          for name in dirs)
-            paths.extend(('f', os.path.join(relative_root, name))
-                         for name in sorted(files))
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                relative_path = os.path.join(relative_root, name)
+                if os.path.islink(path):
+                    digest = 'symlink:%s' % os.readlink(path)
+                else:
+                    hasher = hashlib.sha256()
+                    with open(path, 'rb') as handle:
+                        while True:
+                            chunk = handle.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            hasher.update(chunk)
+                    digest = hasher.hexdigest()
+                paths.append(('f', relative_path, digest))
         return paths
 
 
