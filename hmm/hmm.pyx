@@ -33,23 +33,29 @@ _BASE_CODE = [-1] * 256
 _BASE_CODE[ord('A')], _BASE_CODE[ord('C')] = 0, 1
 _BASE_CODE[ord('G')], _BASE_CODE[ord('T')] = 2, 3
 
-#: Per-thread DP scratch (threading.local(): genuinely per-thread, never on self --
-#: advntr/read_selection.py's docstring is why that matters). Re-keyed on n_states,
-#: never aliased: a numpy row-slice narrower than the buffer's own shape is not
-#: Fortran-contiguous (only a column slice is), so a differently sized model gets a
-#: wholly fresh pair rather than a sub-view of a bigger one. Column count (read
-#: length) alone grows in place, since that IS a safe column slice -- the common
-#: case, one model decoding many reads on a thread (task-6-report.md).
+#: Per-thread vpath scratch ONLY (threading.local(): genuinely per-thread, never on
+#: self -- advntr/read_selection.py's docstring is why that matters). The score table
+#: is deliberately NOT amortised here: fix round 1 measured reusing it as a large,
+#: reproducible serial regression (+27% isolated, +8% combined with vpath reuse) with
+#: no mechanism the removed allocation, the threading.local lookup or the generated
+#: DP-loop C can account for (all confirmed negligible or byte-identical --
+#: task-6-report.md's fix round 1 section). Only the ~1.56 MB vpath allocation Task 5
+#: identified as the dominant per-call cost is amortised; the 41 KB score table stays
+#: a fresh `np.empty` every call, as it was before this task, and costs nothing extra
+#: to allocate fresh (confirmed: reusing it serially is neutral-to-harmful, never a
+#: measurable win). Re-keyed on n_states, never aliased: a numpy row-slice narrower
+#: than the buffer's own shape is not Fortran-contiguous (only a column slice is), so
+#: a differently sized model gets a wholly fresh buffer rather than a sub-view of a
+#: bigger one. Column count (read length) alone grows in place.
 _dp_scratch = threading.local()
 
 def _thread_scratch(n_states, n_cols):
     cached = getattr(_dp_scratch, 'buffers', None)
-    if cached is None or cached[2] != n_states or cached[3] < n_cols:
-        cols = max(n_cols, cached[3]) if cached is not None and cached[2] == n_states else n_cols
-        cached = (np.empty((n_states, 2), dtype=np.double, order='F'),
-                  np.zeros((n_states, cols), dtype=np.intc, order='F'), n_states, cols)
+    if cached is None or cached[1] != n_states or cached[2] < n_cols:
+        cols = max(n_cols, cached[2]) if cached is not None and cached[1] == n_states else n_cols
+        cached = (np.zeros((n_states, cols), dtype=np.intc, order='F'), n_states, cols)
         _dp_scratch.buffers = cached
-    return cached[0], cached[1][:, :n_cols]
+    return cached[0][:, :n_cols]
 
 
 @cython.wraparound(False)
@@ -60,6 +66,14 @@ cdef int _traceback(int[::1, :] vpath_table_row, unsigned char[::1] silent,
     frees) instead of the old `vpath.insert(0, ...)`, O(n^2) under the GIL for a
     ~156-entry path (task-6-report.md). Runs nogil; the caller appends once per entry
     and reverses, O(n), to recover start-to-end order.
+
+    This buffer is deliberately malloc'd and freed fresh every call, not amortised
+    into the thread-local scratch: it is small (256 ints, like the score table this
+    task's fix round found amortising a SMALL buffer measurably slower, not faster,
+    for a reason no available profiling tool could pin down -- AGENTS.md Traps). Not
+    re-measured here because the C-level malloc/free pair this replaces is a
+    different allocator path than numpy's, but the same caution applies: prove a win
+    before amortising a small buffer, do not assume one.
     """
     cdef int cap = 256, n = 0, pred_row, pred_col
     cdef int* buf = <int*> malloc(cap * sizeof(int))
@@ -608,11 +622,12 @@ cdef class Model(object):
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
 
+        # Score table: fresh every call. _thread_scratch's docstring explains why,
+        # unlike the vpath table, this one is not amortised (fix round 1).
+        cdef double[::1,:] dynamic_table = np.empty((self.n_states, 2), dtype=np.double, order='F')
         # Per-thread (never self -- read_selection.py) scratch from _thread_scratch,
         # amortising the ~1.56 MB vpath allocation across calls on this thread.
-        scratch_score, scratch_vpath = _thread_scratch(self.n_states, sequence_length + 1)
-        cdef double[::1,:] dynamic_table = scratch_score
-        cdef int[::1,:] vpath_table_row = scratch_vpath
+        cdef int[::1,:] vpath_table_row = _thread_scratch(self.n_states, sequence_length + 1)
 
         cdef int row, col, ch
 

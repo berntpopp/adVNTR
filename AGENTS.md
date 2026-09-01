@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1429 |
-| `hmm/hmm.pyx` | 694 |
+| `hmm/hmm.pyx` | 709 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
 
@@ -240,6 +240,27 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   raising. Every real MUC1 model has >= 2 subModels (prefix/repeat/suffix,
   concatenated), so this never fires in production; a single-subModel synthetic test
   model is what surfaces it (task-6-report.md).
+
+- **Reusing `viterbi()`'s small (41 KB) score table across calls via
+  `threading.local()` is measurably SLOWER, not faster, for a reason no profiling
+  tool in this sandbox could pin down.** Task 6 fix round 1 measured it directly: an
+  isolated score-only-reuse build cost +27% serial (2.34 ms -> 2.96 ms/attempt versus
+  a fresh-every-call build); the shipped combined-reuse build cost +8%. Every
+  mechanism that could plausibly explain it was checked and ruled out --
+  `hmm/hmm.c`'s `_viterbi_fill` body is byte-identical before/after (the DP loop's own
+  codegen cannot be the cause); `/usr/bin/time -v` shows minor page faults and
+  `Maximum resident set size` essentially unchanged across every variant, with the
+  entire gap landing in `User time`; `strace -c` shows near-identical `mmap`/`munmap`/
+  `brk` counts. `perf_event_paranoid=4` in this sandbox blocks hardware counters
+  (`cache-misses`, `cycles`), so the exact micro-architectural mechanism (cache
+  associativity conflict from a persistent small allocation's fixed address,
+  something in glibc's per-arena free-list state, or another effect below what
+  `/usr/bin/time`/`strace` can see) was never identified. The FIX is not to explain
+  it but to avoid it: only the large (~1.56 MB) vpath table is amortised via
+  `_thread_scratch`; the score table stays a fresh `np.empty` every call, exactly as
+  it was before Task 6, and costs nothing to keep that way (task-6-report.md's fix
+  round 1 section has the full ablation matrix). Do not "simplify" this by folding
+  the score table back into the reused scratch without re-measuring serial first.
 
 ## Never
 
