@@ -262,6 +262,8 @@ cdef class Model(object):
                         'model must be complete, and the flat emission cache has no '
                         'way to reproduce the KeyError the dict lookup used to raise'
                         % index)
+        if not silent[self.n_states - 2]:  # viterbi()'s final relaxation derives, not stores, its column
+            raise ValueError('states[n_states-2] (index %d) is not silent, but viterbi() derives its final relaxation assuming it is' % (self.n_states - 2))
         indptr = np.cumsum(indptr).astype(np.intc)
         flat_indices = np.zeros(indptr[self.n_states], dtype=np.intc)
         flat_logp = np.zeros(indptr[self.n_states], dtype=np.double)
@@ -639,12 +641,10 @@ cdef class Model(object):
         cdef double[::1,:] dynamic_table = np.full((self.n_states, sequence_length + 1), -np.inf, dtype=np.double, order='F')
         dynamic_table[self.state_to_index[self.start]][0] = log(1)
 
-        # Storing previous states row and column separately (Naive version)
+        # Predecessor row only -- column is derived at traceback time, not stored.
         cdef int[::1,:] vpath_table_row = np.zeros((self.n_states, sequence_length + 1), dtype=np.intc, order='F')
-        cdef int[::1,:] vpath_table_col = np.zeros((self.n_states, sequence_length + 1), dtype=np.intc, order='F')
 
-        cdef int row, col
-        cdef int ch
+        cdef int row, col, ch
 
         # Hoist the flat tables into locals so the DP can run with the GIL released:
         # attribute access on self would need it back.
@@ -659,7 +659,7 @@ cdef class Model(object):
         cdef int fill_status = 0
         with nogil:
             fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
-                          vpath_table_col, indptr, indices, silent, emissions,
+                          indptr, indices, silent, emissions,
                           weights, threshold, sequence_length,
                           start_index, NULL, True)
         if fill_status != 0:
@@ -679,14 +679,13 @@ cdef class Model(object):
             if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10:
                 dynamic_table[neighbor_state_index][col] = log_prob
                 vpath_table_row[neighbor_state_index][col] = row
-                vpath_table_col[neighbor_state_index][col] = col
 
         # Back tracking viterbi path from the Prefix Matcher End
         cdef list vpath = []
         cdef int end_index = self.state_to_index[self.subModels[self.n_subModels-1].end]
 
         vpath.insert(0, (end_index, self.subModels[self.n_subModels-1].end))
-        row, col = vpath_table_row[end_index][sequence_length], vpath_table_col[end_index][sequence_length]
+        row, col = vpath_table_row[end_index][sequence_length], (sequence_length if silent[vpath_table_row[end_index][sequence_length]] else sequence_length - 1)
 
         cdef double logp = dynamic_table[self.state_to_index[self.subModels[self.n_subModels-1].end]][sequence_length]
         if logp == -np.inf:  # no path with satisfying the threshold
@@ -694,7 +693,7 @@ cdef class Model(object):
 
         while row != 0 or col != 0:
             vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
-            row, col = vpath_table_row[row][col], vpath_table_col[row][col]
+            row, col = vpath_table_row[row][col], (col if silent[vpath_table_row[row][col]] else col - 1)
         vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
         return logp, vpath
 

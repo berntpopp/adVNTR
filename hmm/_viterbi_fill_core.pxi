@@ -3,7 +3,6 @@
 cdef int _viterbi_fill(int[::1] encoded_sequence,
                         double[::1,:] dynamic_table,
                         int[::1,:] vpath_table_row,
-                        int[::1,:] vpath_table_col,
                         int[::1] indptr,
                         int[::1] indices,
                         unsigned char[::1] silent,
@@ -49,6 +48,8 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
     `skip_enabled=False` every one of those pops falls through into the counting site
     instead, reproducing the 41.8%/46.6% measured with the skip's own condition
     evaluated but not acted on.
+
+    No `vpath_table_col`: predecessor column of `vpath_table_row[r,c]` is `c if silent[row] else c-1` (task-4-report.md: 0 violations/1,041,573 cells).
     """
     cdef int row, col, k, ch, neighbor_state_index, next_col, start, end, n_states
     cdef double log_prob, emission, current
@@ -163,7 +164,6 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                         cur_tail += 1
                         dynamic_table[neighbor_state_index, col] = log_prob
                         vpath_table_row[neighbor_state_index, col] = row
-                        vpath_table_col[neighbor_state_index, col] = col
             else:  # Emitting state: consume a character and advance a column
                 emission = emissions[row, ch]
                 for k in range(start, end):
@@ -191,7 +191,6 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                         nxt_tail += 1
                         dynamic_table[neighbor_state_index, next_col] = log_prob
                         vpath_table_row[neighbor_state_index, next_col] = row
-                        vpath_table_col[neighbor_state_index, next_col] = col
 
     free(cur)
     free(nxt)

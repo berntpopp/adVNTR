@@ -42,8 +42,10 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
         writes/pushes happen) is otherwise identical, which is what lets Finding 2/3's
         tests compare "skip on" against "skip off" on the SAME compiled fill.
     :param dp_tables: optional dict, filled in place with the raw
-        'dynamic_table'/'vpath_row'/'vpath_col'/'silent' arrays this call produced, so
-        a caller can check per-cell invariants beyond the single backtracked path.
+        'dynamic_table'/'vpath_row'/'silent' arrays this call produced, so a caller can
+        check per-cell invariants beyond the single backtracked path. No 'vpath_col'
+        (Task 4): the predecessor column is derived, not stored -- see
+        _viterbi_fill_core.pxi's docstring.
     :return: an int32 numpy array [pops, noop_pops, edge_relaxations, successful_writes].
     """
     if not model.is_baked:
@@ -60,9 +62,9 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
     # that distinction matters elsewhere), so this needs no libm import here.
     dynamic_table[start_index, 0] = 0.0
 
+    # Predecessor row only -- the column is derived, not stored (Task 4;
+    # _viterbi_fill_core.pxi's docstring).
     cdef int[::1, :] vpath_table_row = np.zeros(
-        (model.n_states, sequence_length + 1), dtype=np.intc, order='F')
-    cdef int[::1, :] vpath_table_col = np.zeros(
         (model.n_states, sequence_length + 1), dtype=np.intc, order='F')
 
     cdef int[::1] indptr = model.nbr_indptr
@@ -79,7 +81,7 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
     cdef int fill_status = 0
     with nogil:
         fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
-                      vpath_table_col, indptr, indices, silent, emissions,
+                      indptr, indices, silent, emissions,
                       weights, threshold, sequence_length,
                       start_index, &counters_view[0], skip_flag)
     if fill_status != 0:
@@ -88,7 +90,6 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
     if dp_tables is not None:
         dp_tables['dynamic_table'] = np.asarray(dynamic_table)
         dp_tables['vpath_row'] = np.asarray(vpath_table_row)
-        dp_tables['vpath_col'] = np.asarray(vpath_table_col)
         dp_tables['silent'] = np.asarray(silent)
 
     return counters

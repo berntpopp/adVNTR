@@ -87,8 +87,9 @@ you touch one, leave it smaller than you found it:
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1429 |
-| `hmm/hmm.pyx` | 713 |
+| `hmm/hmm.pyx` | 712 |
 | `advntr/hmm_utils.py` | 900 |
+| `hmm/_viterbi_fill_core.pxi` | 199 |
 
 `pomegranate/` is excluded: not compiled, not maintained.
 

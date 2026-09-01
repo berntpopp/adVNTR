@@ -23,8 +23,12 @@ import gzip
 import os
 import unittest
 
+import numpy as np
+
 from advntr_harness.capture import _ModelCache
-from advntr_harness.workload import decode_with_counters
+from advntr_harness.workload import decode_instrumented, decode_with_counters
+from hmm.base import DiscreteDistribution, State
+from hmm.hmm import Model
 
 GOLDEN = os.path.join(os.path.dirname(__file__), 'golden')
 MODELS = os.path.join(GOLDEN, 'models')
@@ -133,6 +137,60 @@ class TestDecoderWorkload(unittest.TestCase):
         counters = decode_with_counters(self.model, self.read)
         self.assertGreater(counters['edge_relaxations'], counters['successful_writes'])
 
+    def test_predecessor_column_matches_the_relaxation_that_wrote_each_cell(self):
+        """Task 4 deleted `vpath_table_col`: a silent source always relaxes
+        in-column and an emitting source always into the next column, so a written
+        cell (r, c)'s predecessor column is fully determined by its predecessor row
+        alone -- `c if silent[vpath_row[r, c]] else c - 1`. A one-time check against
+        the OLD stored column, run before it was deleted, found 0 violations across
+        1,041,573 written cells spanning 3 decodes and both Tier 1 model contexts
+        (task-4-report.md) -- the licence to delete it. With the table gone there is
+        nothing left to compare the derived column against directly, so this
+        committed regression checks the DP's own recurrence instead: for every
+        written cell, dynamic_table[r, c] must equal dynamic_table at the DERIVED
+        predecessor cell plus the CSR edge weight (plus the emission, if that
+        predecessor is not silent) -- proof the derived column names the cell whose
+        relaxation actually produced (r, c), not merely a structurally plausible
+        one."""
+        tables = {}
+        decode_instrumented(self.model, self.read, dp_tables=tables)
+        dynamic_table = tables['dynamic_table']
+        vpath_row = tables['vpath_row']
+        silent = tables['silent']
+
+        indptr = np.asarray(self.model.nbr_indptr)
+        indices = np.asarray(self.model.nbr_indices)
+        weights = np.asarray(self.model.nbr_logp)
+        emissions = np.asarray(self.model.emissions)
+        encoded = np.asarray(self.model.get_encoded_sequence(self.read))
+        start_index = self.model.state_to_index[self.model.start]
+
+        # One CSR pass, not a per-cell search: (from_row, to_row) -> edge weight.
+        edge_weight = {}
+        for from_row in range(len(indptr) - 1):
+            for k in range(indptr[from_row], indptr[from_row + 1]):
+                edge_weight[(from_row, int(indices[k]))] = weights[k]
+
+        n_states, n_cols = dynamic_table.shape
+        checked = 0
+        for col in range(n_cols):
+            for row in np.where(dynamic_table[:, col] != -np.inf)[0]:
+                row = int(row)
+                if row == start_index and col == 0:
+                    continue  # the seed, not a relaxation target
+                pred_row = int(vpath_row[row, col])
+                pred_col = col if silent[pred_row] else col - 1
+                self.assertGreaterEqual(pred_col, 0)
+                self.assertNotEqual(dynamic_table[pred_row, pred_col], float('-inf'))
+
+                expected = dynamic_table[pred_row, pred_col] + edge_weight[(pred_row, row)]
+                if not silent[pred_row]:
+                    expected += emissions[pred_row, encoded[pred_col]]
+                self.assertAlmostEqual(dynamic_table[row, col], expected, places=9)
+                checked += 1
+
+        self.assertGreater(checked, 300000, 'checked %d cells' % checked)
+
     def test_production_call_is_unaffected(self):
         """`model.viterbi(sequence)` -- no counters, no dp_tables, no skip_enabled --
         is exactly what every production call site uses, and must keep returning what
@@ -145,6 +203,36 @@ class TestDecoderWorkload(unittest.TestCase):
         self.assertGreater(len(vpath), 0)
 
         self.assertRaises(TypeError, self.model.viterbi, self.read, counters=None)
+
+
+class TestBakeRejectsANonSilentFinalRelaxationSource(unittest.TestCase):
+    """`viterbi()`'s hardcoded final relaxation (states[n_states-2] into its
+    neighbours) derives -- does not store -- its write's predecessor column, sound
+    only because that source relaxes in-column, i.e. is silent (Task 4). Needs no
+    Tier 1 fixtures: builds the smallest topology that puts an EMITTING state at
+    states[n_states-2] directly, so this guards the inference against topology
+    drift rather than against anything a real MUC1 model happens to look like
+    today."""
+
+    def test_bake_raises_when_the_second_to_last_state_emits(self):
+        model = Model(name='t4-topology-guard')
+        mid = State(DiscreteDistribution({'A': 0.25, 'C': 0.25, 'G': 0.25, 'T': 0.25}),
+                    name='mid')
+        model.add_state(mid)
+        model.set_transition(model.start, mid, 1.0)
+        model.set_transition(mid, model.end, 1.0)
+
+        self.assertRaises(ValueError, model.bake, sort_by_name=True)
+
+    def test_a_silent_second_to_last_state_bakes_cleanly(self):
+        model = Model(name='t4-topology-guard-silent')
+        mid = State(None, name='mid')
+        model.add_state(mid)
+        model.set_transition(model.start, mid, 1.0)
+        model.set_transition(mid, model.end, 1.0)
+
+        model.bake(sort_by_name=True)
+        self.assertTrue(model.is_baked)
 
 
 if __name__ == '__main__':
