@@ -144,6 +144,45 @@ testing the branch it covers.
 
 An upstream patch gets no exemption from either.
 
+### `--prune-reverse`: a worked Tier B example
+
+The one Tier B flag shipped so far. `--prune-reverse` (Task 8; `advntr/settings.py:55`
+`PRUNE_REVERSE_DECODE`, default `False`) runs the reverse-complement decode with
+`threshold = max(dp_score_threshold, fwd_logp)` instead of `dp_score_threshold` alone
+(`advntr/read_selection.py:_decode_one`, via `hmm.hmm.Model.viterbi`'s
+`min_threshold`). Sound because every DP edge weight is `<= 0` (log probabilities), so a
+path's running score is non-increasing column by column: if the true best reverse path
+beats `fwd_logp`, every prefix of it also clears the raised threshold, so raising it this
+way can only prune paths that could never have won.
+
+- **Default-off, and the default path is untouched.** With the flag off, `_decode_one`
+  is byte-for-byte the pre-Task-8 code path. Tier 2 (all 8 public `example_*` BAMs,
+  288,096 decode attempts) is VERIFIED identical against the pristine 05fd98a kernel
+  with the flag off.
+- **The safety valve is load-bearing, not defence-in-depth.** The monotonicity argument
+  above covers only the non-strict half of `_viterbi_fill_core.pxi`'s write guard
+  (`log_prob >= threshold`, `:149,176`) -- not its other half, the `log_prob -
+  dynamic_table[...] > 1e-10` relaxation epsilon. Pruning removes writes, so a pruned
+  run's incumbent at a cell can be lower than the unpruned run's, letting it accept a
+  relaxation the unpruned run rejects as sub-epsilon -- a different value and push,
+  hence a different visit order downstream (this file's Traps section, "Visit order is semantic").
+  `_SAFETY_VALVE_MARGIN = 1e-6` (`advntr/read_selection.py`) re-runs the reverse decode
+  unpruned whenever the pruned score comes within that margin of `fwd_logp`; bit-exactness
+  with the flag on rests on that margin being four orders of magnitude wider than the
+  `1e-10` epsilon that creates the gap, not on the threshold argument alone.
+- **Measured (own harness, public `example_*` corpus only).** Flag-on vs flag-off
+  selected-read digests identical on all 8 public `TIER2_FILES` (count, query-name
+  order, and digest all matched). Safety valve fired on 17/20,556 = 0.083% of
+  reverse-decode attempts (a 3,000-read prefix of each of the 8 files). Speedup
+  1.50-1.66x by min/median -- BELOW the plan's ~1.9x estimate: pruning touches only the
+  reverse decode, never forward, and its benefit is strongly margin-dependent (median
+  per-read relaxation-count drop 95.6%, matching the estimate, but the aggregate
+  sum-weighted drop only 72.2-91.2%, since a minority of weak-margin reads dominates the
+  sum).
+- **Worth enabling** on throughput-sensitive runs where that 1.5-1.66x reverse-decode
+  speedup matters. Turning it on by default is a separate decision that has not been
+  taken -- it stays opt-in.
+
 ## Git and PRs
 
 - Conventional commits (`feat:`, `fix:`, `perf:`, `test:`, `build:`, `docs:`, `refactor:`).
