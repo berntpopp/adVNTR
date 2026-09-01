@@ -13,7 +13,7 @@ NEW_FILE_LIMIT = 650
 #: must come DOWN over time -- lower one when you shrink a file, never raise one.
 GRANDFATHERED = {
     'advntr/plot.py': 1445,
-    'advntr/vntr_finder.py': 1406,
+    'advntr/vntr_finder.py': 1405,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx

@@ -135,7 +135,6 @@ class VNTRFinder:
         queries = set(queries)
         return queries
 
-
     def is_true_read(self, read):
         read_start = read.reference_start
         reference_name = read.reference_name
@@ -603,7 +602,7 @@ class VNTRFinder:
                         state += "_LEN{}".format(occurrence)
                     prefix_suffix_mutations[state] += 1
 
-        sorted_mutations = sorted(mutations.items(), key=lambda x: x[1])
+        sorted_mutations = sorted(mutations.items(), key=lambda item: (item[1], item[0]))
         logging.debug('sorted mutations: %s ' % sorted_mutations)
 
         frameshifts = []

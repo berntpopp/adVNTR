@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1406 |
+| `advntr/vntr_finder.py` | 1405 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -220,13 +220,14 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **`wraparound=False` segfaults.** The code relies on negative indexing and `boundscheck`
   is already off. Verified empirically, not theorised.
 
-- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:1133`
+- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:1079`
   unconditionally rebuilds the model from a read length derived from `samfile.head(5)`.
-  Two consequences: `iteratively_update_model` (`:1099`) passes a refined model that is
-  silently discarded, so its refinement loop cannot converge; and the model a run used is
-  *not* the one you handed it. On the corpus BAMs the derived length is 151, giving a
-  **2565**-state model — a hand-built `read_length=150` model has **2559**. Fingerprint
-  `finder.hmm` *after* the call, never before.
+  On the corpus BAMs the derived length is 151, giving a **2565**-state model — a
+  hand-built `read_length=150` model has **2559**. Fingerprint `finder.hmm` *after* the
+  call, never before. `genotype -fs -u` does **not** silently fail to converge:
+  `iteratively_update_model` (`advntr/vntr_finder.py:1022-1045`) rebuilds through the
+  non-enhanced `get_read_matcher_model`, whose `Model.from_matrix` call at
+  `advntr/hmm_utils.py:745` raises `AttributeError` on the enhanced backend.
 
 - **`derive_read_length` can IndexError.** It is `sorted(head(5) lengths)[3]`, so a BAM
   whose head yields fewer than four records crashes. Mirrored in the harness rather than
@@ -248,10 +249,6 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **The egg is zip-safe but ships `.so` files**, so they are extracted to
   `~/.cache/Python-Eggs` at first import. Stale after a rebuild; breaks on read-only
   `$HOME`.
-
-- **Tied mutations sort by count alone** (`advntr/vntr_finder.py:659`) over a Python 2
-  `defaultdict`, so their order follows hash-table layout and insertion history, not read
-  order. Preserving read order does **not** by itself make tied output deterministic.
 
 - **Final-column silent states are never drained.** The main loop is
   `for col in range(sequence_length)`, so silent states activated at `col == L` are
