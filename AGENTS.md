@@ -213,6 +213,19 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   enqueuing it*. That last detail breaks any scratch-reuse scheme that tracks only the
   work queue.
 
+- **A hung `Model.viterbi` traceback cannot be interrupted by `signal.alarm`.** If `logp`
+  ever comes out finite for a read whose DP fill broke early (work queue empty before
+  column `sequence_length`), the traceback loop (`while row != 0 or col != 0: ...`) walks
+  `vpath_table_row` cells that were never legitimately written for that path and can spin
+  forever. It is a tight `nogil`-compiled C loop holding the GIL, so it never returns to
+  the bytecode dispatch point that delivers a pending Python signal -- `signal.alarm`, and
+  therefore a bare in-process `unittest` assertion, cannot stop it. Task 5's naive
+  no-reset rolled-table prototype hit exactly this (task-5-report.md): a wrong finite
+  `logp`, then a hang killed only by an external `timeout`/SIGTERM (exit 143/124). The
+  regression test for it (`tests/test_decoder_workload.py`,
+  `tests/_early_break_worker.py`) therefore runs the production call in a
+  `timeout`-wrapped subprocess, never in-process.
+
 - **`recruit_read` needs the vpath, not indices.** It calls
   `get_number_of_matches_in_vpath`, which unpacks `(idx, state)` tuples. Passing a tuple
   of ints raises `TypeError: 'int' object is not iterable`.

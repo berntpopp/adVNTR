@@ -21,6 +21,8 @@ counters/dp_tables/skip_enabled arguments at all.
 """
 import gzip
 import os
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -33,6 +35,13 @@ from hmm.hmm import Model
 GOLDEN = os.path.join(os.path.dirname(__file__), 'golden')
 MODELS = os.path.join(GOLDEN, 'models')
 READS = os.path.join(GOLDEN, 'tier1_reads.txt.gz')
+
+# Fix round 1 (Finding 1): the naive-prototype failure this guards against is a
+# HANG (AGENTS.md Traps), so the production half of the test below runs in a
+# `timeout`-wrapped subprocess, not in-process -- see _early_break_worker.py.
+_EARLY_BREAK_THRESHOLD = -23.0
+_EARLY_BREAK_TIMEOUT_S = 30
+_EARLY_BREAK_WORKER = os.path.join(os.path.dirname(__file__), '_early_break_worker.py')
 
 has_fixtures = unittest.skipUnless(
     os.path.isfile(READS),
@@ -139,24 +148,67 @@ class TestDecoderWorkload(unittest.TestCase):
 
     def test_early_break_leaves_the_final_column_at_negative_infinity(self):
         """Task 5's Step 1: synthesises the early-break case the real corpus never
-        hits (0 of 800 attempts empty the queue before the final column). Raising
-        `dp_score_threshold` to -23.0 makes the fill stop writing after column 10
-        of 151 -- confirmed via decode_instrumented's dp_tables against this same
-        fixture, and NOT a threshold so extreme nothing is ever written (column 10
-        still gets 14,451 successful writes; the per-column max decays
-        monotonically from -21.72 at column 10 to -25.30 at column 11, so -23.0
-        blocks column 11 specifically). Pins today's full-table behaviour --
-        column `sequence_length`, never reached, stays -inf from its initial
-        allocation -- so a rolled two-column implementation cannot silently
-        surface stale finite data under that name instead.
+        hits (0 of 800 attempts empty the queue before the final column). Fix
+        round 1 folded in two review findings, both about THIS test rather than
+        the DP it exercises (task-5-report.md Fix round 1).
+
+        Half 1 (Minor 5) -- IN-PROCESS: proves `dp_score_threshold=-23.0` still
+        causes a GENUINE early break with real work behind it, rather than
+        trusting that claim to prose. Without this, a future change to the score
+        landscape could make -23.0 degenerate into trivial immediate rejection
+        (break at column 0, nothing written) and this test would keep passing
+        while silently no longer exercising the crux -- the corpus itself never
+        does (0 of 800 attempts), so this synthetic case is the ONLY guard for
+        it. Safe to run directly: `decode_instrumented`'s table is always
+        full-size (Task 5 only rolls PRODUCTION's), so this half cannot hang.
+
+        Half 2 (Finding 1) -- SUBPROCESS, `timeout`-bounded: the naive
+        rolled-table prototype (task-5-report.md Sec 2) did not merely return a
+        wrong `logp` and stop -- the wrong finite value sent `Model.viterbi`'s
+        traceback into an unbounded walk over `vpath_table_row` cells nothing
+        legitimately wrote. That is a tight `nogil`-compiled C loop holding the
+        GIL: it never reaches the bytecode dispatch point that delivers a
+        pending signal, so `signal.alarm` cannot stop it (AGENTS.md Traps). A
+        bare in-process assertion here would therefore hang `make test`/CI for
+        GitHub Actions' 360-minute default instead of failing fast on a
+        regression -- so the production call runs in `_early_break_worker.py`
+        under `timeout`, and a killed subprocess FAILS this test loudly.
         """
         original = self.model.dp_score_threshold
-        self.model.dp_score_threshold = -23.0
+        self.model.dp_score_threshold = _EARLY_BREAK_THRESHOLD
         try:
-            logp, _vpath = self.model.viterbi(self.read)
+            tables = {}
+            counters = decode_instrumented(self.model, self.read, dp_tables=tables)
         finally:
             self.model.dp_score_threshold = original
-        self.assertEqual(logp, float('-inf'))
+
+        dynamic_table = tables['dynamic_table']
+        written = np.where(np.any(dynamic_table != -np.inf, axis=0))[0]
+        last_written_column = int(written.max())
+        final_column = dynamic_table.shape[1] - 1
+        self.assertGreater(last_written_column, 0,
+                            'break happened at column 0 -- no real work behind it')
+        self.assertLess(
+            last_written_column, final_column,
+            'fill reached column %d (the final one) -- not an early break; '
+            '-23.0 no longer isolates this case' % final_column)
+        self.assertGreater(
+            int(counters[3]), 1000,
+            'only %d successful writes -- too small to trust as genuine work, '
+            'not a threshold so extreme nothing gets written' % counters[3])
+
+        proc = subprocess.Popen(
+            ['timeout', str(_EARLY_BREAK_TIMEOUT_S), sys.executable, _EARLY_BREAK_WORKER,
+             MODELS, READS, 'hg19@151', repr(_EARLY_BREAK_THRESHOLD)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _stderr = proc.communicate()
+        self.assertEqual(
+            proc.returncode, 0,
+            'production Model.viterbi did not return within %ds (returncode=%r) '
+            '-- this is the naive-prototype HANG this test exists to catch, not '
+            'a clean assertion failure; see AGENTS.md Traps. subprocess output:\n%s'
+            % (_EARLY_BREAK_TIMEOUT_S, proc.returncode, stdout))
+        self.assertEqual(stdout.strip(), '-inf')
 
     def test_predecessor_column_matches_the_relaxation_that_wrote_each_cell(self):
         """Task 4 deleted `vpath_table_col`: a silent source always relaxes
