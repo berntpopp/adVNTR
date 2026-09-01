@@ -158,7 +158,6 @@ class VNTRFinder:
             return True
         return False
 
-
     def process_unmapped_read(self, sema, read_segment, hmm, recruitment_score, vntr_bp_in_unmapped_reads,
                               selected_reads, compute_reverse=True):
         if read_segment.count('N') <= 0:
@@ -185,14 +184,12 @@ class VNTRFinder:
                             error_rate=settings.INDEL_ERROR_RATE):
         if observed_indel_transitions > location_coverage:
             return 0, 1.0, 0
-        from scipy.stats import binom
-        from scipy import stats
+        from scipy.stats import binom, chi2
         sequencing_error_prob = binom.pmf(observed_indel_transitions, location_coverage, error_rate)
         frameshift_prob = binom.pmf(observed_indel_transitions, location_coverage, expected_indels)
-
-        chi_square_val = -2 * numpy.log(sequencing_error_prob / frameshift_prob)
-        pval = stats.chi2.sf(chi_square_val, 1)
-
+        chi_square_val = -2 * (binom.logpmf(observed_indel_transitions, location_coverage, error_rate) -
+                               binom.logpmf(observed_indel_transitions, location_coverage, expected_indels))
+        pval = chi2.sf(chi_square_val, 1)
         return sequencing_error_prob, frameshift_prob, pval
 
     @staticmethod
