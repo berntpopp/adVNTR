@@ -26,6 +26,21 @@ class TestLeftNormaliseInsertion(unittest.TestCase):
     def test_right_repeat_unit_boundary_can_normalise_to_left_boundary(self):
         self.assertEqual(left_normalise_insertion('ATAT', 4, 'AT'), (0, 'AT'))
 
+    def test_empty_or_none_reference_units_are_rejected(self):
+        for ref_unit in ('', None):
+            with self.assertRaises(ValueError):
+                left_normalise_insertion(ref_unit, 0, 'A')
+
+    def test_empty_or_none_insertions_are_rejected(self):
+        for inserted_sequence in ('', None):
+            with self.assertRaises(ValueError):
+                left_normalise_insertion('ACGT', 0, inserted_sequence)
+
+    def test_offsets_outside_the_inclusive_slot_range_are_rejected(self):
+        for offset in (-1, 5):
+            with self.assertRaises(ValueError):
+                left_normalise_insertion('ACGT', offset, 'A')
+
 
 if __name__ == '__main__':
     unittest.main()

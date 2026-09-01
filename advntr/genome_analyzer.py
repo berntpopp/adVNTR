@@ -212,12 +212,15 @@ class GenomeAnalyzer:
         print("#Input File: {}".format(alignment_file))
         print("#Reference file: {}".format(self.ref_filename))
         print("#P-value cutoff: {}".format(settings.INDEL_MUTATION_MIN_PVALUE))
-        print("#VID\tState\tNumberOfSupportingReads\tMeanCoverage\tPvalue")
+        print("#VID\tState\tNumberOfSupportingReads\tMeanCoverage\tPvalue\tContext")
         for vid in self.target_vntr_ids:
             results = self.vntr_finder[vid].find_frameshift_from_alignment_file(alignment_file, [])
             if results is not None:
                 for state, count, avg_bp_coverage, pval in results:
-                    print("{}\t{}\t{}\t{}\t{}".format(vid, state, count, avg_bp_coverage, pval))
+                    context = self.vntr_finder[vid].last_frameshift_context[state]
+                    print("{}\t{}\t{}\t{}\t{}\t{}".format(
+                        vid, state, count, avg_bp_coverage, pval, context
+                    ))
 
 
     def find_repeat_counts_from_alignment_file(self, alignment_file, average_coverage, update=False):
