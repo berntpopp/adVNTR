@@ -8,7 +8,7 @@ import numpy
 from Cython.Build import cythonize
 
 from advntr import __version__
-from build_config import CYTHON_DIRECTIVES, EXTENSION_SOURCES
+from build_config import CYTHON_DIRECTIVES, PRODUCTION_EXTENSION_SOURCES
 
 setup(name='advntr',
       version=__version__,
@@ -28,8 +28,10 @@ setup(name='advntr',
       entry_points={
             'console_scripts': ['advntr=advntr.__main__:main']
       },
+      # PRODUCTION_EXTENSION_SOURCES, not a `hmm/*.pyx` glob: the installed package
+      # must not ship hmm/hmm_instrumented.pyx (test-only). See build_config.py.
       ext_modules=cythonize(
-            EXTENSION_SOURCES,
+            PRODUCTION_EXTENSION_SOURCES,
             compiler_directives=CYTHON_DIRECTIVES,
             nthreads=4,
       ),

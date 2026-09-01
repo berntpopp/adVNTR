@@ -18,6 +18,7 @@ pomegranate/*.c
 pomegranate/*.so
 # Cython-generated only. hmm/queue.c is a HAND-WRITTEN tracked source.
 hmm/hmm.c
+hmm/hmm_instrumented.c
 hmm/base.c
 
 .coverage

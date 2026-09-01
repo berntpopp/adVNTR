@@ -13,9 +13,25 @@ NEW_FILE_LIMIT = 650
 #: must come DOWN over time -- lower one when you shrink a file, never raise one.
 GRANDFATHERED = {
     'advntr/plot.py': 1445,
-    'advntr/vntr_finder.py': 1419,
-    'hmm/hmm.pyx': 986,
+    'advntr/vntr_finder.py': 1406,
+    'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
+    # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
+    # each `include` this file, so it is hand-maintained exactly like hmm.pyx is, and
+    # was invisible to this ratchet before this entry -- .pxi was not a checked
+    # extension, so hmm.pyx (713) + this file (200) = 913 hand-maintained lines went
+    # unnoticed against the 882 ceiling that stood before Task 3 fix round 1 (Task 3
+    # fix round 2, Finding A). Grandfathered, not on the new-file limit, because it is
+    # the direct continuation of hmm.pyx's own DP body, not a new module. Task 4
+    # deleted `vpath_table_col` from both files (913 -> 911 combined); ceilings lowered
+    # to match (713 -> 712, 200 -> 199). Task 6 (per-thread scratch, an off-GIL
+    # traceback, a LUT encoder) touches only hmm.pyx (712 -> 694, funded by deleting
+    # Model.log_probability plus condensing inherited docstring prose); fix round 1
+    # dropped score-table reuse on measured evidence, moved the ablation narrative
+    # into an AGENTS.md Traps entry (which does not count against this ratchet) and
+    # left short pointers in the code, landing at 693 (694 -> 709 -> 693 --
+    # task-6-report.md); this file is untouched, still 199.
+    'hmm/_viterbi_fill_core.pxi': 199,
 }
 
 #: Not compiled, not maintained. See FORK.md.
@@ -31,7 +47,7 @@ def main():
     checked = 0
     failures = []
     for path in tracked:
-        if not (path.endswith('.py') or path.endswith('.pyx')):
+        if not (path.endswith('.py') or path.endswith('.pyx') or path.endswith('.pxi')):
             continue
         if path.startswith(EXCLUDED_PREFIXES):
             continue

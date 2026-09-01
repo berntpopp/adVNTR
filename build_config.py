@@ -32,4 +32,24 @@ CYTHON_DIRECTIVES = {
 # bindings that pass long* where int* is expected, which made `setup.py build_ext` fail
 # outright and so blocked building this package from source at all. The source tree stays
 # for reference. See FORK.md.
-EXTENSION_SOURCES = ["hmm/*.pyx"]
+
+# What ships to end users via `setup.py` (`pip install .`), enumerated rather than
+# globbed. hmm/hmm.pyx (module hmm.hmm, production) `include`s hmm/_viterbi_fill_core.pxi
+# -- a .pxi, so it is never compiled as an extension of its own -- for the actual
+# Viterbi DP fill (Task 3 fix round 1; task-3-report.md).
+#
+# NOT `hmm/*.pyx`: that glob also matches hmm/hmm_instrumented.pyx (module
+# hmm.hmm_instrumented, test-only counters + a skip_enabled toggle, `include`-ing the
+# identical .pxi with a different compile-time DEF), and this list is shared with
+# setup_hmm.py's dev build, so a glob here would ship it to every `pip install` too.
+# FORK.md's 2.0.1 entry records exactly this failure mode already happening once:
+# `find_packages()` shipped `advntr_harness` and `scripts/` -- development tooling --
+# into the installed egg, caught only by installing in Docker and importing from
+# outside the repo. An enumerated list can't silently absorb a new test-only file the
+# way a glob can; anything added to hmm/ ships only if it is added here too.
+PRODUCTION_EXTENSION_SOURCES = ["hmm/base.pyx", "hmm/hmm.pyx"]
+
+# The dev/test build (setup_hmm.py, `make build`) additionally compiles the test-only
+# instrumented module, so `tests/test_decoder_workload.py` (via
+# advntr_harness/workload.py) has something to load. Never used by setup.py.
+DEV_EXTENSION_SOURCES = PRODUCTION_EXTENSION_SOURCES + ["hmm/hmm_instrumented.pyx"]

@@ -62,12 +62,69 @@ TIER1_FILES = (
 #: Canonical identity used for Tier 1 expected rows. See the module docstring.
 TIER1_SOURCE = 'tier1'
 
+#: Tier 2 source files.
+#:
+#: `os.walk`ing VNtyper's `tests/data` -- what this used to do -- also picks up
+#: `remapped/` (46 BAMs) and `derived/`: 681,526 eligible reads, 1,363,052 decode attempts,
+#: 23.1 h at the pristine 61.1 ms/attempt. Restricted to the top-level public corpus (these
+#: eight files) it is 137,656 reads, 275,312 attempts, 4.67 h -- the figure the spec itself
+#: budgets ("~4.8 h"). The recursive walk also makes the Tier 2 digest depend on the
+#: contents of a directory outside this repo, so a baseline captured on one machine could
+#: never be verified on another. Order matches what the old walk produced for these files
+#: (sorted).
+TIER2_FILES = (
+    'example_40cf_hg38_subset.bam',
+    'example_6449_hg19_subset.bam',
+    'example_66bf_hg19_subset.bam',
+    'example_6c28_hg19_subset.bam',
+    'example_7a61_hg19_subset.bam',
+    'example_a5c1_hg19_subset.bam',
+    'example_b178_hg19_subset.bam',
+    'example_dfc3_hg19_subset.bam',
+)
+
 
 #: Sources whose content defines decoder behaviour. Digested into every manifest so a
 #: baseline carries proof of which kernel produced it -- `git stash list` proves nothing
 #: about HEAD, working-tree diffs, or whether the imported .so is stale.
-KERNEL_SOURCES = ('hmm/hmm.pyx', 'hmm/base.pyx', 'hmm/base.pxd', 'hmm/cqueue.pxd',
-                  'hmm/queue.c')
+# hmm/_viterbi_fill_core.pxi holds the actual DP fill (Task 3 fix round 1): hmm.pyx
+# `include`s it, so a change there changes production behaviour exactly as a change to
+# hmm.pyx itself would, and belongs in this list for the same reason. hmm_instrumented.pyx
+# is deliberately NOT here -- it is test-only and never linked into production, so its
+# content cannot affect what a baseline's kernel provenance is claiming to describe.
+KERNEL_SOURCES = ('hmm/hmm.pyx', 'hmm/_viterbi_fill_core.pxi', 'hmm/base.pyx',
+                  'hmm/base.pxd', 'hmm/cqueue.pxd', 'hmm/queue.c')
+
+#: What a Tier 1/2 manifest actually is.
+#:
+#: `tests/golden/tier3_manifest.json` used to be `{"count": ..., "digest": ...}` and
+#: nothing else, added by the threading commit itself, so nothing in the tree said which
+#: kernel produced it -- a reader could mistake it for a pristine baseline like this one
+#: (advntr_harness/tier3.py:101-119; FORK.md's 2.0.2/2.0.3 entries are that mistake's
+#: fallout). Tier 3 now carries its own BASELINE_KIND/BASELINE_NOTE stating it is a
+#: post-rewrite regression baseline that does NOT prove equivalence with pristine. Tier 1
+#: and Tier 2 are the opposite case: this module's own docstring's rule ("Baselines MUST
+#: be captured from the pristine tree before any decoder change") means a manifest
+#: `capture()` produces genuinely IS the pristine gate -- worth stating as explicitly as
+#: Tier 3 states the opposite, so nobody has to re-derive it from kernel_provenance alone.
+BASELINE_KIND = 'pristine equivalence baseline'
+
+BASELINE_NOTE = (
+    "Captured from this fork's pristine kernel (05fd98a, see FORK.md) before any "
+    "decoder change; kernel_provenance records the digests that prove it. Contrast "
+    "tests/golden/tier3_manifest.json, whose baseline_kind and note say the opposite "
+    "(post-rewrite regression baseline, does not prove equivalence with pristine)."
+)
+
+#: Exactly what `capture()` returns, for either tier, before Tier 1's fixture-only keys
+#: (`strata`, `fixture_models`) are appended by `main()`. `tests/test_tier2_baseline.py`
+#: asserts the shipped Tier 2 manifest's key set against this -- the same idiom
+#: `advntr_harness/tier3.py`'s BASELINE_MANIFEST_KEYS uses -- so the artefact and its
+#: producer cannot drift apart unnoticed. Not applied to tests/golden/tier1_manifest.json:
+#: that file predates baseline_kind/note and is out of scope for this change (AGENTS.md's
+#: file-size/data rules; it is not being recaptured here).
+CAPTURE_MANIFEST_KEYS = ('baseline_kind', 'files', 'global_digest', 'kernel_provenance',
+                         'model_contexts', 'note', 'tier')
 
 
 def kernel_provenance(repo_root=None):
@@ -170,12 +227,8 @@ def discover(data_dir, tier):
     if tier == 1:
         return [os.path.join(data_dir, name) for name in TIER1_FILES
                 if os.path.isfile(os.path.join(data_dir, name))]
-    found = []
-    for root, _dirs, files in os.walk(data_dir):
-        for name in sorted(files):
-            if name.endswith('.bam'):
-                found.append(os.path.join(root, name))
-    return sorted(found)
+    return [os.path.join(data_dir, name) for name in TIER2_FILES
+            if os.path.isfile(os.path.join(data_dir, name))]
 
 
 class _ModelCache(object):
@@ -214,7 +267,8 @@ def capture(tier, data_dir, models_dir, collect_attempts):
 
     cache = _ModelCache(models_dir)
     manifest = {'tier': tier, 'files': [], 'model_contexts': {},
-                'kernel_provenance': kernel_provenance()}
+                'kernel_provenance': kernel_provenance(),
+                'baseline_kind': BASELINE_KIND, 'note': BASELINE_NOTE}
     retained = []
     global_digest = hashlib.sha256()
 

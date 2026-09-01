@@ -131,6 +131,20 @@ def get_modified_base_count_for_reference(detected_mutation):
     # return deletion_count - insertion_count
 
 
+def _extend_mutation_sequence(mutation_sequence, addition):
+    """Join mutation tokens with '&' while preserving the old in-place semantics.
+
+    `None` means no sequence is open yet, which is not the same as an empty one: only
+    `None` suppresses the separator. The cross-HMM transition is responsible for opening
+    a new sequence before either join site; this fallback keeps malformed input from
+    raising, but it must not be used to recover a token the transition failed to open.
+    """
+    if mutation_sequence is None:
+        return addition
+    mutation_sequence += '&' + addition
+    return mutation_sequence
+
+
 def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference_vntr_db=None, ref_vntr_dict=None):
     """
     Parse an advntr logfile, find specified mutations (or all if none given),
@@ -341,6 +355,13 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                     if mutation_sequence in target_mutations:
                                         vid_to_aln_info[vid][mutation_sequence].append(
                                             (sequence, visited_states, read_name))
+                                # A new HMM starts a new mutation sequence. Merely updating
+                                # prev_mutation loses this first token when the previous
+                                # sequence was closed by a D/I pair.
+                                mutation_sequence = temp_mutation
+                                if temp_mutation.startswith("I"):
+                                    mutation_sequence += "_LEN{}".format(
+                                        mutation_count_temp[temp_mutation])
                                 prev_mutation = temp_mutation
                                 continue
 
@@ -349,11 +370,8 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                 # In this case, the deletion is connected to the previous mutation sequence and skip
                                 if (prev_mutation_index + 1 == current_mutation_index
                                     and prev_hmm_index == current_hmm_index):
-                                    # <-- FIX: handle None mutation_sequence
-                                    if mutation_sequence is None:
-                                        mutation_sequence = temp_mutation
-                                    else:
-                                        mutation_sequence += '&' + temp_mutation
+                                    mutation_sequence = _extend_mutation_sequence(
+                                        mutation_sequence, temp_mutation)
                                 # Case 2: I/D(j), D(i), j < i-1
                                 # In this case, they are not connected (This should be rare, two separated deletions in a RU)
                                 else:
@@ -369,8 +387,10 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                 if (prev_mutation_index == current_mutation_index
                                     and prev_hmm_index == current_hmm_index):
                                     # Add the insertion and done
-                                    mutation_sequence += "&{}_LEN{}".format(temp_mutation,
-                                                                            mutation_count_temp[temp_mutation])
+                                    mutation_sequence = _extend_mutation_sequence(
+                                        mutation_sequence,
+                                        "{}_LEN{}".format(temp_mutation,
+                                                          mutation_count_temp[temp_mutation]))
                                     if mutation_sequence in target_mutations:
                                         vid_to_aln_info[vid][mutation_sequence].append(
                                             (sequence, visited_states, read_name))

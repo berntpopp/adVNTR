@@ -74,13 +74,23 @@ class TestLocRatchet(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(REPO, path)),
                             'grandfathered path no longer exists: %s' % path)
 
-    def test_grandfathered_ceilings_are_not_below_reality(self):
-        """If a ceiling is below the real size the ratchet is already failing, which
-        means someone lowered it without shrinking the file."""
+    def test_grandfathered_ceilings_exactly_match_reality(self):
+        """A ceiling ABOVE reality is unfunded headroom, and `python
+        scripts/loc_ratchet.py` cannot catch it by itself: that check only compares
+        actual <= ceiling, so a commit that raises a ceiling in the same breath as
+        growing the file reports "ok" straight through the violation (Task 6 fix
+        round 1 did exactly this -- caught only by history-aware review, not the
+        automated gate). Equality makes unfunded headroom impossible by
+        construction: a change that grows a file without shrinking it by at least as
+        much must touch this dict, so the change is visible in the diff that needs
+        it, not banked silently for later."""
         for path, ceiling in loc_ratchet.GRANDFATHERED.items():
             actual = sum(1 for _ in open(os.path.join(REPO, path)))
-            self.assertLessEqual(actual, ceiling,
-                                 '%s is %d lines, ceiling %d' % (path, actual, ceiling))
+            self.assertEqual(actual, ceiling,
+                             '%s is %d lines, ceiling %d -- lower the ceiling to '
+                             'match, or if net growth is funded and intentional, '
+                             'raise it explicitly and say what funded it'
+                             % (path, actual, ceiling))
 
 
 class TestCoverageBaseline(unittest.TestCase):

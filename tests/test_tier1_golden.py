@@ -30,6 +30,45 @@ has_fixtures = unittest.skipUnless(
     '(python -m advntr_harness.capture --tier 1 --out tests/golden)')
 
 
+class TestFixtureFileExists(unittest.TestCase):
+    """Not `@has_fixtures` -- deliberately unconditional (mirrors
+    tests/test_orientation.py::TestFixtureFileExists). This is the most serious
+    of the three places this idiom needed restoring: every class below is
+    `skipUnless`-gated on all three of these files, which is the right idiom for
+    a corpus artefact that may not have been captured yet -- but all three are
+    COMMITTED, and deleting any one of them silently skips the ENTIRE pristine
+    Tier 1 byte-identity gate that every Tier A claim on this branch rests on
+    (AGENTS.md, "The decoder must be proven byte-identical"). `skipUnless` alone
+    turns that into a quiet green run instead of the loudest possible failure.
+    Each file gets its own assertion, with no skip decorator, so a missing file
+    fails by name here rather than degrading the whole module to skipped.
+    """
+
+    def test_the_committed_tier1_reads_fixture_is_present(self):
+        self.assertTrue(
+            os.path.isfile(READS),
+            '%s is missing. COMMITTED fixture, not external -- its absence means '
+            'it was deleted. Regenerate with `python -m advntr_harness.capture '
+            '--tier 1 --out tests/golden` and `git add` it back; this silently '
+            'skips the entire pristine Tier 1 gate.' % READS)
+
+    def test_the_committed_tier1_expected_fixture_is_present(self):
+        self.assertTrue(
+            os.path.isfile(EXPECTED),
+            '%s is missing. COMMITTED fixture, not external -- its absence means '
+            'it was deleted. Regenerate with `python -m advntr_harness.capture '
+            '--tier 1 --out tests/golden` and `git add` it back; this silently '
+            'skips the entire pristine Tier 1 gate.' % EXPECTED)
+
+    def test_the_committed_tier1_manifest_fixture_is_present(self):
+        self.assertTrue(
+            os.path.isfile(MANIFEST),
+            '%s is missing. COMMITTED fixture, not external -- its absence means '
+            'it was deleted. Regenerate with `python -m advntr_harness.capture '
+            '--tier 1 --out tests/golden` and `git add` it back; this silently '
+            'skips the entire pristine Tier 1 gate.' % MANIFEST)
+
+
 @has_fixtures
 class TestTier1Golden(unittest.TestCase):
     @classmethod

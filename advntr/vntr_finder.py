@@ -12,7 +12,6 @@ from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
-from advntr.coverage_bias import CoverageBiasDetector, CoverageCorrector
 from advntr.hmm_utils import *
 from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
@@ -1118,10 +1117,10 @@ class VNTRFinder:
         # ---- Phase 2: the only parallel part. `Model.viterbi` assigns nothing to
         # `self`, so one baked model is shared read-only and every DP buffer is a
         # per-call local; the DP releases the GIL, which is what makes this worth
-        # anything. Snapshot the thread count so a concurrent change to the global
-        # cannot alter it midway.
+        # anything. Snapshot both globals (thread count, Task 8's prune-reverse flag)
+        # so a concurrent change to either cannot alter phase 2 midway.
         n_threads = read_selection.resolve_thread_count(settings.CORES)
-        read_selection.decode_pending(hmm, pending_reads, n_threads)
+        read_selection.decode_pending(hmm, pending_reads, n_threads, bool(settings.PRUNE_REVERSE_DECODE))
 
         # ---- Phase 3: serial, in original fetch order.
         for pending in pending_reads:
@@ -1177,18 +1176,6 @@ class VNTRFinder:
         haplotypes = 1 if self.is_haploid else 2
         estimate = [int(pattern_occurrences / (float(average_coverage) * haplotypes))] * 2
         return estimate
-        pattern_occurrences = total_counted_vntr_bp / float(len(self.reference_vntr.pattern))
-        read_mode = self.get_alignment_file_read_mode(alignment_file)
-        samfile = pysam.AlignmentFile(alignment_file, read_mode, reference_filename=self.reference_filename)
-        reference = get_reference_genome_of_alignment_file(samfile)
-        bias_detector = CoverageBiasDetector(alignment_file, self.reference_vntr.chromosome, reference)
-        coverage_corrector = CoverageCorrector(bias_detector.get_gc_content_coverage_map())
-
-        logging.info('Sequencing mean coverage: %s' % coverage_corrector.get_sequencing_mean_coverage())
-        observed_copy_number = pattern_occurrences / coverage_corrector.get_sequencing_mean_coverage()
-        scaled_copy_number = coverage_corrector.get_scaled_coverage(self.reference_vntr, observed_copy_number)
-        logging.info('scaled copy number and observed copy number: %s, %s' % (scaled_copy_number, observed_copy_number))
-        return [scaled_copy_number]
 
     @time_usage
     def find_repeat_count_from_selected_reads(self, selected_reads, average_coverage=None):

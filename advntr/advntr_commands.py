@@ -72,6 +72,7 @@ def genotype(args, genotype_parser):
     if args.threads < 1:
         print_error(genotype_parser, 'threads cannot be less than 1')
     settings.CORES = args.threads
+    settings.PRUNE_REVERSE_DECODE = args.prune_reverse
 
     if args.expansion and args.coverage is None:
         print_error(genotype_parser, 'Please specify the average coverage to identify the expansion')

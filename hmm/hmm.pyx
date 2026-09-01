@@ -4,131 +4,82 @@
 
 from collections import defaultdict
 from operator import attrgetter
+import threading
 
 from .base cimport DiscreteDistribution
 from .base cimport State
 
 import numpy as np
 cimport numpy as np
-from libc.math cimport log
+from libc.math cimport log, INFINITY
 from libc.stdlib cimport malloc, realloc, free
 
 cimport cython
 
+# `_viterbi_fill` itself lives in _viterbi_fill_core.pxi, included below and again
+# (with a different DEF) from hmm_instrumented.pyx. See that file's docstring for why:
+# a runtime `counters != NULL` guard in the hot loop, however written, still measured
+# 4.2-4.5% on this build (Task 3 fix round 1) -- over the ~1% budget no matter how the
+# branch is shaped -- so production compiles the guards out entirely instead of hiding
+# them behind one.
+DEF INSTRUMENTED = False
+include "_viterbi_fill_core.pxi"
+
+#: 256-entry base encoder, indexed by ord(); -1 is the sentinel get_encoded_sequence()
+#: raises KeyError on -- an array index replacing a dict lookup, same failure on an
+#: undeclared symbol (bake() already refuses a model whose emitting states do not
+#: declare all of A/C/G/T, precisely so that failure stays loud, not a silent 0).
+_BASE_CODE = [-1] * 256
+_BASE_CODE[ord('A')], _BASE_CODE[ord('C')] = 0, 1
+_BASE_CODE[ord('G')], _BASE_CODE[ord('T')] = 2, 3
+
+#: Per-thread vpath scratch ONLY (threading.local(): genuinely per-thread, never on
+#: self -- advntr/read_selection.py's docstring is why that matters). The score
+#: table is deliberately NOT amortised here -- see AGENTS.md Traps ("Reusing
+#: viterbi()'s small score table..."). Re-keyed on n_states, never aliased: a numpy
+#: row-slice narrower than the buffer's own shape is not Fortran-contiguous (only a
+#: column slice is), so a differently sized model gets a wholly fresh buffer rather
+#: than a sub-view of a bigger one. Column count (read length) alone grows in place.
+_dp_scratch = threading.local()
+
+def _thread_scratch(n_states, n_cols):
+    cached = getattr(_dp_scratch, 'buffers', None)
+    if cached is None or cached[1] != n_states or cached[2] < n_cols:
+        cols = max(n_cols, cached[2]) if cached is not None and cached[1] == n_states else n_cols
+        cached = (np.zeros((n_states, cols), dtype=np.intc, order='F'), n_states, cols)
+        _dp_scratch.buffers = cached
+    return cached[0][:, :n_cols]
 
 
-@cython.boundscheck(False)
 @cython.wraparound(False)
-cdef int _viterbi_fill(int[::1] encoded_sequence,
-                        double[::1,:] dynamic_table,
-                        int[::1,:] vpath_table_row,
-                        int[::1,:] vpath_table_col,
-                        int[::1] indptr,
-                        int[::1] indices,
-                        unsigned char[::1] silent,
-                        double[:, ::1] emissions,
-                        double[::1] weights,
-                        double threshold,
-                        int sequence_length,
-                        int start_index) nogil:
-    """Fill the Viterbi DP table. Pure C -- runs with the GIL released.
-
-    This is the body that used to live inline in Model.viterbi plus
-    Model.__update_dynamic_table. It touches no Python object: the graph arrives as
-    CSR (`indptr`/`indices`), emissions as a flat (state, base) table, and silence as
-    a byte flag, all built once in bake(). Relaxation order is unchanged -- neighbours
-    are still visited in the ascending order bake() sorted them into -- so the
-    resulting logp and path are bit-identical to the pre-nogil version.
+@cython.boundscheck(False)
+cdef int _traceback(int[::1, :] vpath_table_row, unsigned char[::1] silent,
+                     int row, int col, int** out_rows) nogil:
+    """Walk vpath_table_row to the DP's origin into a malloc'd growable array (caller
+    frees, fresh every call, not amortised -- AGENTS.md Traps explains why) instead
+    of the old `vpath.insert(0, ...)`, O(n^2) under the GIL for a ~156-entry path
+    (task-6-report.md). Runs nogil; the caller appends once and reverses, O(n).
     """
-    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end
-    cdef double log_prob, emission, current
-
-    # Two array-backed FIFOs replacing the linked-list Queue, whose queue_push_tail
-    # malloc'd a 24-byte node per relaxation (~1.5M malloc/free pairs per call).
-    # Push at tail, pop at head, never wrap: byte-for-byte the same visit ORDER the
-    # linked list produced. Order is load-bearing -- the relaxation guard is
-    # `> 1e-10`, not `> 0`, so this is not an order-independent fixpoint and a LIFO
-    # would silently change vpath.
-    cdef int cur_cap = 4096, nxt_cap = 4096
-    cdef int cur_head = 0, cur_tail = 0, nxt_head = 0, nxt_tail = 0
-    cdef int* cur = <int*> malloc(cur_cap * sizeof(int))
-    cdef int* nxt = <int*> malloc(nxt_cap * sizeof(int))
-    cdef int* swap_buf
+    cdef int cap = 256, n = 0, pred_row, pred_col
+    cdef int* buf = <int*> malloc(cap * sizeof(int))
     cdef int* grown
-    cdef int swap_int
-
-    if cur == NULL or nxt == NULL:
-        free(cur)
-        free(nxt)
+    if buf == NULL:
         return -1
-
-    nxt[0] = start_index
-    nxt_tail = 1
-
-    for col in range(sequence_length):
-        swap_buf = cur; cur = nxt; nxt = swap_buf
-        swap_int = cur_cap; cur_cap = nxt_cap; nxt_cap = swap_int
-        cur_head = 0
-        cur_tail = nxt_tail
-        nxt_head = 0
-        nxt_tail = 0
-
-        if cur_head == cur_tail:
-            break
-
-        ch = encoded_sequence[col]
-        next_col = col + 1
-
-        while cur_head < cur_tail:
-            row = cur[cur_head]
-            cur_head += 1
-            start = indptr[row]
-            end = indptr[row + 1]
-            current = dynamic_table[row, col]
-
-            if silent[row]:  # Silent state: stay in the same column
-                for k in range(start, end):
-                    neighbor_state_index = indices[k]
-                    log_prob = current + weights[k]
-
-                    if log_prob - dynamic_table[neighbor_state_index, col] > 1e-10 and log_prob >= threshold:
-                        if cur_tail == cur_cap:
-                            grown = <int*> realloc(cur, 2 * cur_cap * sizeof(int))
-                            if grown == NULL:
-                                free(cur)
-                                free(nxt)
-                                return -1
-                            cur = grown
-                            cur_cap *= 2
-                        cur[cur_tail] = neighbor_state_index
-                        cur_tail += 1
-                        dynamic_table[neighbor_state_index, col] = log_prob
-                        vpath_table_row[neighbor_state_index, col] = row
-                        vpath_table_col[neighbor_state_index, col] = col
-            else:  # Emitting state: consume a character and advance a column
-                emission = emissions[row, ch]
-                for k in range(start, end):
-                    neighbor_state_index = indices[k]
-                    log_prob = current + weights[k] + emission
-
-                    if log_prob - dynamic_table[neighbor_state_index, next_col] > 1e-10 and log_prob >= threshold:
-                        if nxt_tail == nxt_cap:
-                            grown = <int*> realloc(nxt, 2 * nxt_cap * sizeof(int))
-                            if grown == NULL:
-                                free(cur)
-                                free(nxt)
-                                return -1
-                            nxt = grown
-                            nxt_cap *= 2
-                        nxt[nxt_tail] = neighbor_state_index
-                        nxt_tail += 1
-                        dynamic_table[neighbor_state_index, next_col] = log_prob
-                        vpath_table_row[neighbor_state_index, next_col] = row
-                        vpath_table_col[neighbor_state_index, next_col] = col
-
-    free(cur)
-    free(nxt)
-    return 0
+    while True:
+        if n == cap:
+            grown = <int*> realloc(buf, 2 * cap * sizeof(int))
+            if grown == NULL:
+                free(buf)
+                return -1
+            buf, cap = grown, 2 * cap
+        buf[n] = row
+        n += 1
+        if row == 0 and col == 0:
+            out_rows[0] = buf
+            return n
+        pred_row = vpath_table_row[row, col]
+        pred_col = col if silent[pred_row] else col - 1
+        row, col = pred_row, pred_col
 
 
 cdef class Model(object):
@@ -154,7 +105,9 @@ cdef class Model(object):
     # 2D matrix (After conforming the topology, create one matrix for visualization)
     cdef double[:, ::1] transition_matrix
     # cdef int[:,:] neighboring_state_indices
-    cdef dict state_to_index
+    # public: hmm_instrumented.pyx's decode_instrumented() reads it off an already-baked
+    # Model to find start_index, without duplicating any construction/bake() logic.
+    cdef public dict state_to_index
 
     # Flat, index-addressed mirrors of the graph, built in bake() and read by the
     # Viterbi DP. Same content as `neighbors` / `State.is_silent()` /
@@ -197,8 +150,6 @@ cdef class Model(object):
         # store transitions as a map
         self.transition_map = dict()
         self.neighbors = dict()
-        # 2D matrix (After conforming the topology, create one matrix for visualization)
-        # self.transition_matrix = NULL
         self.state_to_index = dict()
 
         # Put start and end in the states
@@ -260,27 +211,6 @@ cdef class Model(object):
     def add_transitions(self, transitions):
         pass
 
-    def log_probability(self, seq):
-        T = len(seq)
-        N = self.state_count() - 2 # exclude the first two states (model-start and model-end)
-        prob_mat = np.zeros((N,2))
-        for n in range(N):
-            state = self.states[n]
-            prob_mat[n,0] = self.transition_map[self.start][state] * state.distribution[seq[0]]
-        for t in range(1,T):
-            prob_mat[:,t%2] = 0.0
-            for n in range(N):
-                state = self.states[n]
-                for n_prev in range(N):
-                    state_prev = self.states[n_prev]
-                    prob_mat[n,t%2] += prob_mat[n_prev,(t-1)%2] * self.transition_map[state_prev][state]
-                prob_mat[n,t%2] *= state.distribution[seq[t]]
-        for n in range(N):
-            state = self.states[n]
-            prob_mat[n,(T-1)%2] *= self.transition_map[state][self.end]
-        prob = sum(prob_mat[:,(T-1)%2])
-        return np.log(prob)
-
     def bake(self, read_length=None, dp_score_threshold=None, merge=None, sort_by_name=False):
         """
         In a model, start state comes the first and end state comes the last.
@@ -309,10 +239,6 @@ cdef class Model(object):
             else:
                 subModel._sort_states()
 
-            # indices = {subModel.states[i]: i for i in range(subModel.n_states)}
-            # subModel.start_index = indices[subModel.start]
-            # subModel.end_index = indices[subModel.end]
-
         # Start is the start state of the very fist sub-model
         self.start = self.subModels[0].start
         # End is the end state of the very last sub-model
@@ -335,6 +261,18 @@ cdef class Model(object):
         self.n_states = n_states
         self.transition_map = transition_map
 
+        # viterbi()'s traceback uses a row it already has as its own index instead of
+        # re-deriving it through state_to_index[states[row]] -- sound only because
+        # state_to_index is the plain positional inverse of states, built above by
+        # zip()ing each subModel's states against a range(). Verified equal for all
+        # 2,565 states of the shipped MUC1 model; asserted here so a future subModel
+        # topology that breaks the invariant (e.g. a duplicated state object) fails
+        # loudly instead of silently addressing the wrong state.
+        for index, state in enumerate(self.states):
+            if self.state_to_index[state] != index:
+                raise ValueError('state_to_index[states[%d]] != %d: viterbi() '
+                                 'addresses traceback rows directly and would '
+                                 'silently corrupt the path' % (index, index))
 
         self.transition_matrix = np.zeros((self.n_states, self.n_states), dtype=np.double, order='C')
         cdef int from_index = 0
@@ -372,6 +310,8 @@ cdef class Model(object):
                         'model must be complete, and the flat emission cache has no '
                         'way to reproduce the KeyError the dict lookup used to raise'
                         % index)
+        if not silent[self.n_states - 2]:  # viterbi()'s final relaxation derives, not stores, its column
+            raise ValueError('states[n_states-2] (index %d) is not silent, but viterbi()\'s final relaxation derives its target column assuming it is, and would silently corrupt the path' % (self.n_states - 2))
         indptr = np.cumsum(indptr).astype(np.intc)
         flat_indices = np.zeros(indptr[self.n_states], dtype=np.intc)
         flat_logp = np.zeros(indptr[self.n_states], dtype=np.double)
@@ -395,12 +335,6 @@ cdef class Model(object):
         self.silent = silent
         self.emissions = emissions
 
-        # Find start and end index of repeats matcher
-        # if len(self.subModels) > 1:
-        #     repeat_matcher_model = self.subModels[1]
-        #     self.repeat_start_index = self.state_to_index[repeat_matcher_model.start]
-        #     self.repeat_end_index = self.state_to_index[repeat_matcher_model.end]
-
         self.is_baked = True
 
     def transition_matrix_view(self):
@@ -419,55 +353,11 @@ cdef class Model(object):
         return view
 
     def _sort_states(self):
-        """
-        Sort states in pre-defined (topology of our hmm model) order.
-
-        State naming rule:
-        There should be three types of state except start and end
-        1. Insert
-        2. Match
-        3. Delete
-        Insertion states start with I
-        Match states start with M
-        Delete states start with D
-
-        Format:
-        I/M/D[index]_[repeating_unit_index]
-
-        Example:
-
-        total_hmm_start
-        --------------------------
-        suffix_matcher_hmm_start
-        ...
-        suffix_matcher_hmm_end
-        --------------------------
-        Repeating Pattern Matcher HMM Model-start
-        --------------------------
-        unit_start_1
-        I0_1
-        D1_1
-        M1_1
-        I1_1
-        ...
-        unit_end_1
-        --------------------------
-        unit_start_2
-        I0_2
-        D1_2
-        M1_2
-        I1_2
-        ...
-        unit_end_2
-        ...
-        --------------------------
-        Repeating Pattern Matcher HMM Model-end
-        --------------------------
-        prefix_matcher_hmm_start
-        ...
-        prefix_matcher_hmm_end
-        --------------------------
-        total_hmm_end
+        """Sort states into topology order: start, then per repeat-unit
+        [unit_start, I0, (D,M,I)*, unit_end], then end -- names are
+        I/M/D[index]_[repeat_unit_index], with the flanking unit_start/unit_end
+        markers being neither. bake() (Task 6) relies on the resulting self.states
+        always ending in the model's own end state, and beginning with start.
 
         :return: None
         """
@@ -488,21 +378,15 @@ cdef class Model(object):
 
             if state.name.startswith("I"):
                 insert_states[repeat_unit_id].append(state)
-                # insert_states.append(state)
             elif state.name.startswith("M"):
                 match_states[repeat_unit_id].append(state)
-                # match_states.append(state)
             elif state.name.startswith("D"):
                 delete_states[repeat_unit_id].append(state)
-                # delete_states.append(state)
             else:
                 if "_start_" in state.name:
                     dummy_start_states[repeat_unit_id].append(state)
-                    # dummy_start_states.append(state)
                 if "_end_" in state.name:
                     dummy_end_states[repeat_unit_id].append(state)
-                    # dummy_end_states.append(state)
-                # assert ("start" in state.name or "end" in state.name), "State type should be in (I, M, D, start, end)"
 
         for repeat_unit_id, states in insert_states.items():
             states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
@@ -512,9 +396,6 @@ cdef class Model(object):
 
         for repeat_unit_id, states in delete_states.items():
             states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # insert_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # match_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # delete_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
 
         # 1. Model-start state
         sorted_states.append(self.start)
@@ -540,44 +421,9 @@ cdef class Model(object):
         sorted_states.append(self.end)
         self.states = sorted_states
 
-        # # 1.1 Dummy start state
-        # for dummy_start in dummy_start_states:
-        #     sorted_states.append(dummy_start)
-        #
-        # # 2. Insert 0 state (number of repeating units)
-        # for i in range(len(dummy_start_states)):
-        #     sorted_states.append(insert_states.pop(0))
-        #
-        # # 3. Delete, Match, Insert states
-        # assert (len(match_states) == len(delete_states))
-        #
-        # for i in range(len(match_states)):
-        #     sorted_states.append(delete_states[i])
-        #     sorted_states.append(match_states[i])
-        #     sorted_states.append(insert_states[i])
-        #
-        # # 4.0 Dummy end state
-        # for dummy_end in dummy_end_states:
-        #     sorted_states.append(dummy_end)
-        #
-        # # 4. End state
-        # sorted_states.append(self.end)
-        #
-        # self.states = sorted_states
-
     def dense_transition_matrix( self ):
-        """Returns the dense transition matrix.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        matrix : numpy.ndarray, shape (n_states, n_states)
-            A dense transition matrix, containing the probability
-            of transitioning from each state to each other state.
-        """
+        """The dense (n_states, n_states) transition PROBABILITY matrix (not the log
+        matrix bake() builds as self.transition_matrix)."""
 
         m = len(self.states)
         transition_probabilities = np.zeros( (m, m) )
@@ -591,134 +437,12 @@ cdef class Model(object):
 
         return transition_probabilities
 
-    # @classmethod
-    # def from_matrix(cls, transition_probabilities, distributions, starts, ends=None,
-    #                 state_names=None, name=None, verbose=False, merge='All' ):
-    #     """Create a model from a more standard matrix format.
-    #
-    #     Take in a 2D matrix of floats of size n by n, which are the transition
-    #     probabilities to go from any state to any other state. May also take in
-    #     a list of length n representing the names of these nodes, and a model
-    #     name. Must provide the matrix, and a list of size n representing the
-    #     distribution you wish to use for that state, a list of size n indicating
-    #     the probability of starting in a state, and a list of size n indicating
-    #     the probability of ending in a state.
-    #
-    #     Parameters
-    #     ----------
-    #     transition_probabilities : array-like, shape (n_normal_states, n_normal_states)
-    #         The probabilities of each state transitioning to each other state.
-    #
-    #     distributions : array-like, shape (n_normal_states)
-    #         The distributions for each state. Silent states are indicated by
-    #         using None instead of a distribution object.
-    #
-    #     starts : array-like, shape (n_normal_states)
-    #         The probabilities of starting in each of the states.
-    #
-    #     ends : array-like, shape (n_normal_states), optional
-    #         If passed in, the probabilities of ending in each of the states.
-    #         If ends is None, then assumes the model has no explicit end
-    #         state. Default is None.
-    #
-    #     state_names : array-like, shape (n_normal_states), optional
-    #         The name of the states. If None is passed in, default names are
-    #         generated. Default is None
-    #
-    #     name : str, optional
-    #         The name of the model. Default is None
-    #
-    #     verbose : bool, optional
-    #         The verbose parameter for the underlying bake method. Default is False.
-    #
-    #     merge : 'None', 'Partial', 'All', optional
-    #         The merge parameter for the underlying bake method. Default is All
-    #
-    #     Returns
-    #     -------
-    #     model : Model
-    #         The baked model ready to go.
-    #
-    #     Examples
-    #     --------
-    #     matrix = [ [ 0.4, 0.5 ], [ 0.4, 0.5 ] ]
-    #     distributions = [NormalDistribution(1, .5), NormalDistribution(5, 2)]
-    #     starts = [ 1., 0. ]
-    #     ends = [ .1., .1 ]
-    #     state_names= [ "A", "B" ]
-    #
-    #     model = Model.from_matrix( matrix, distributions, starts, ends,
-    #         state_names, name="test_model" )
-    #     """
-    #
-    #     # Build the initial model
-    #     model = Model( name=name )
-    #     state_names = state_names or ["s{}".format(i) for i in range(len(distributions))]
-    #
-    #     # Build state objects for every state with the appropriate distribution
-    #     states = [ State( distribution, name=name ) for name, distribution in
-    #                zip( state_names, distributions) ]
-    #
-    #     n = len( states )
-    #
-    #     # Add all the states to the model
-    #     for state in states:
-    #         model.add_state( state )
-    #
-    #     # Connect the start of the model to the appropriate state
-    #     for i, prob in enumerate( starts ):
-    #         if prob != 0:
-    #             model.add_transition( model.start, states[i], prob )
-    #
-    #     # Connect all states to each other if they have a non-zero probability
-    #     for i in range( n ):
-    #         for j, prob in enumerate( transition_probabilities[i] ):
-    #             if prob != 0.:
-    #                 model.add_transition( states[i], states[j], prob )
-    #
-    #     if ends is not None:
-    #         # Connect states to the end of the model if a non-zero probability
-    #         for i, prob in enumerate( ends ):
-    #             if prob != 0:
-    #                 model.add_transition( states[j], model.end, prob )
-    #
-    #     model.bake()
-    #     return model
-
     def concatenate(self, other, suffix='', prefix='', transition_probability=1.0):
-        """Concatenate this model to another model.
-
-        Concatenate this model to another model in such a way that a single
-        probability 1 edge is added between self.end and other.start. Rename
-        all other states appropriately by adding a suffix or prefix if needed.
-
-        Parameters
-        ----------
-        other : HiddenMarkovModel
-            The other model to concatenate
-
-        suffix : str, optional
-            Add the suffix to the end of all state names in the other model.
-            Default is ''.
-
-        prefix : str, optional
-            Add the prefix to the beginning of all state names in the other
-            model. Default is ''.
-
-        transition_probability :
-            The transition probability from the last model and the other model
-
-        Returns
-        -------
-        None
+        """Append `other` as a new subModel, wiring self.end -> other.start at
+        `transition_probability`. `suffix`/`prefix` are accepted for the upstream
+        signature but unused here -- no caller on the supported path renames states.
         """
-        # other.name = "{}{}{}".format(prefix, other.name, suffix)
-        # for state in other.states:
-        #     state.name = "{}{}{}".format(prefix, state.name, suffix)
-
-        # self.subModels[self.n_subModels] = other
         self.append_subModel(other)
-        # self.subModels.append(other)
         self.n_subModels += 1
 
         # setting connections between subModels if they exist
@@ -760,20 +484,6 @@ cdef class Model(object):
         cdef char ch
         for col in range(sequence_length):
             for row in range(state_count-1):
-                # Don't believe partially mapped read (the first and last)
-                # if col == 0 and row == 0:
-                #     neighbor_states = "all_match_states"
-                #     for neighbor_state in neighbor_states:
-                #         neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
-                #         if neighbor_state_index > repeat_end_index - repeat_start_index:
-                #             continue
-                #         prob = dynamic_table[row][col] + log(self.transition_map[state][neighbor_state])
-                #
-                #         if prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-                #             dynamic_table[neighbor_state_index][col] = prob
-                #             vpath_table_row[neighbor_state_index][col] = row
-                #             vpath_table_col[neighbor_state_index][col] = col
-
                 row_index = repeat_start_index + row
                 if col != 0 and dynamic_table[row][col] < self.dp_score_threshold:
                     continue
@@ -794,9 +504,7 @@ cdef class Model(object):
                 neighbor_state_index = 0
                 log_prob = 0
                 for neighbor_state in neighbor_states:
-                    #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                     neighbor_state_index = self.state_to_index[neighbor_state]
-                    #if neighbor_state_index > repeat_end_index - repeat_start_index:
                     if neighbor_state_index > repeat_end_index:
                         continue
                     log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index]
@@ -846,9 +554,7 @@ cdef class Model(object):
 
         if state.is_silent():  # Silent state: Stay in the same column
             for neighbor_state in neighbor_states:
-                #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                 neighbor_state_index = self.state_to_index[neighbor_state]
-                #if neighbor_state_index > repeat_end_index - repeat_start_index:
                 if neighbor_state_index > repeat_end_index:
                     continue
                 log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index]
@@ -860,9 +566,7 @@ cdef class Model(object):
                     vpath_table_col[zero_based_neighbor_index][col] = col
         else:  # Not a silent state: Emit a character and move to the next column
             for neighbor_state in neighbor_states:
-                #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                 neighbor_state_index = self.state_to_index[neighbor_state]
-                #if neighbor_state_index > repeat_end_index - repeat_start_index:
                 if neighbor_state_index > repeat_end_index:
                     continue
                 log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index] + state.distribution[ch]
@@ -874,42 +578,42 @@ cdef class Model(object):
                     vpath_table_col[zero_based_neighbor_index][col + 1] = col
 
     cpdef get_encoded_sequence(self, sequence):
-        key_map = {'A':0, 'C':1, 'G':2, 'T':3}
-        encoded_seq = [key_map[ch] for ch in sequence]
+        cdef int i, n = len(sequence)
+        encoded_seq = [0] * n
+        for i in range(n):
+            encoded_seq[i] = _BASE_CODE[ord(sequence[i])]
+            if encoded_seq[i] < 0:
+                raise KeyError(sequence[i])
         return np.array(encoded_seq, dtype=np.intc)
 
     @cython.wraparound(False)
     @cython.boundscheck(False)
-    cpdef tuple viterbi(self, sequence):
+    cpdef tuple viterbi(self, sequence, min_threshold=None):
         """
         :param sequence: a sequence
+        :param min_threshold: per-call floor OR'd with self.dp_score_threshold via max() --
+            never assigned to self (thread-unsafe; see read_selection.py:_decode_one).
         :return: log probability and viterbi path
+
+        Production only -- no counters, no dp_tables, no skip_enabled toggle. That
+        instrumentation lives entirely in hmm.hmm_instrumented (test-only,
+        decode_instrumented()), a SEPARATE extension built from the same
+        _viterbi_fill_core.pxi with DEF INSTRUMENTED = True, so it costs this module
+        nothing (Task 3 fix round 1; task-3-report.md).
         """
         if not self.is_baked:
             raise ValueError("ERROR: To call viterbi, the model must have been baked")
-
-        # Find start and end index of repeats matcher
-        cdef Model repeat_matcher_model = self.subModels[1]
-        cdef int repeat_start_index = self.state_to_index[repeat_matcher_model.start]
-        cdef int repeat_end_index = self.state_to_index[repeat_matcher_model.end]
 
         # Initialize dynamic programming table
         # Rows represent states and Columns represent sequence
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
-
-        # self.dynamic_table = np.ones((self.n_states, sequence_length + 1), dtype=np.double) * (-np.inf)
-        # self.dynamic_table[self.state_to_index[self.start]][0] = np.log(1)
-
-        cdef double[::1,:] dynamic_table = np.full((self.n_states, sequence_length + 1), -np.inf, dtype=np.double, order='F')
-        dynamic_table[self.state_to_index[self.start]][0] = log(1)
-
-        # Storing previous states row and column separately (Naive version)
-        cdef int[::1,:] vpath_table_row = np.zeros((self.n_states, sequence_length + 1), dtype=np.intc, order='F')
-        cdef int[::1,:] vpath_table_col = np.zeros((self.n_states, sequence_length + 1), dtype=np.intc, order='F')
-
-        cdef int row, col
-        cdef int ch
+        # Score table: fresh every call -- see _thread_scratch's docstring.
+        cdef double[::1,:] dynamic_table = np.empty((self.n_states, 2), dtype=np.double, order='F')
+        # Per-thread (never self -- read_selection.py) scratch from _thread_scratch,
+        # amortising the ~1.56 MB vpath allocation across calls on this thread.
+        cdef int[::1,:] vpath_table_row = _thread_scratch(self.n_states, sequence_length + 1)
+        cdef int row, col, ch
 
         # Hoist the flat tables into locals so the DP can run with the GIL released:
         # attribute access on self would need it back.
@@ -918,58 +622,61 @@ cdef class Model(object):
         cdef unsigned char[::1] silent = self.silent
         cdef double[:, ::1] emissions = self.emissions
         cdef double[::1] weights = self.nbr_logp
-        cdef double threshold = self.dp_score_threshold
+        cdef double threshold = self.dp_score_threshold if min_threshold is None else max(self.dp_score_threshold, min_threshold)
         cdef int start_index = self.state_to_index[self.start]
 
         cdef int fill_status = 0
         with nogil:
+            # Reused scratch is not guaranteed -inf like a fresh np.full was; reset
+            # here, under nogil, before _viterbi_fill's own per-column reset takes over.
+            for row in range(self.n_states):
+                dynamic_table[row, 0] = -INFINITY
+                dynamic_table[row, 1] = -INFINITY
+            dynamic_table[start_index, 0] = log(1)
             fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
-                          vpath_table_col, indptr, indices, silent, emissions,
+                          indptr, indices, silent, emissions,
                           weights, threshold, sequence_length,
-                          start_index)
+                          start_index, NULL, True)
         if fill_status != 0:
             raise MemoryError('Viterbi work queue could not be grown')
 
-
         # For the last update
         col = sequence_length
+        cdef int col_phys = col & 1  # physical index into the rolled table, not the logical column
         state = self.states[self.n_states-2]
-        row = self.state_to_index[state]
+        row = self.n_states - 2  # state_to_index[states[row]] == row (bake() asserts it)
 
         cdef int neighbor_state_index = 0
         cdef double log_prob = 0
         neighbor_indices = self.neighbors[state]
         for neighbor_state_index in neighbor_indices:
-            log_prob = dynamic_table[row][col] + self.transition_matrix[row][neighbor_state_index]
+            log_prob = dynamic_table[row][col_phys] + self.transition_matrix[row][neighbor_state_index]
 
-            if log_prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-                dynamic_table[neighbor_state_index][col] = log_prob
+            if log_prob - dynamic_table[neighbor_state_index][col_phys] > 1e-10:
+                dynamic_table[neighbor_state_index][col_phys] = log_prob
                 vpath_table_row[neighbor_state_index][col] = row
-                vpath_table_col[neighbor_state_index][col] = col
 
         # Back tracking viterbi path from the Prefix Matcher End
+        cdef int end_index = self.n_states - 1  # == state_to_index[subModels[-1].end]
+        cdef double logp = dynamic_table[end_index][col_phys]
+        if logp == -np.inf:  # no path satisfying the threshold
+            return logp, [(end_index, self.subModels[self.n_subModels-1].end)]
+
+        # _traceback walks nogil into a malloc'd array; append once + reverse
+        # replaces the old O(n^2) front-of-list insertion under the GIL.
+        cdef int* path_rows
+        cdef int path_len
+        with nogil:
+            path_len = _traceback(vpath_table_row, silent, end_index, sequence_length, &path_rows)
+        if path_len < 0:
+            raise MemoryError('Viterbi traceback could not be grown')
+
         cdef list vpath = []
-        cdef int end_index = self.state_to_index[self.subModels[self.n_subModels-1].end]
-
-        vpath.insert(0, (end_index, self.subModels[self.n_subModels-1].end))
-        row, col = vpath_table_row[end_index][sequence_length], vpath_table_col[end_index][sequence_length]
-
-        cdef double logp = dynamic_table[self.state_to_index[self.subModels[self.n_subModels-1].end]][sequence_length]
-        if logp == -np.inf:  # no path with satisfying the threshold
-            return logp, vpath
-
-        while row != 0 or col != 0:
-            vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
-            row, col = vpath_table_row[row][col], vpath_table_col[row][col]
-        vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
+        for row in range(path_len):
+            vpath.append((path_rows[row], self.states[path_rows[row]]))
+        free(path_rows)
+        vpath.reverse()
         return logp, vpath
-
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-
-
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
 
     def check_sanity_of_transition_prob(self, verbose):
         for subModel in self.subModels:
