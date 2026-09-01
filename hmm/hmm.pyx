@@ -30,7 +30,8 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                         double[::1] weights,
                         double threshold,
                         int sequence_length,
-                        int start_index) nogil:
+                        int start_index,
+                        int* counters) nogil:
     """Fill the Viterbi DP table. Pure C -- runs with the GIL released.
 
     This is the body that used to live inline in Model.viterbi plus
@@ -39,8 +40,18 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
     a byte flag, all built once in bake(). Relaxation order is unchanged -- neighbours
     are still visited in the ascending order bake() sorted them into -- so the
     resulting logp and path are bit-identical to the pre-nogil version.
+
+    `counters`, when not NULL, is a caller-allocated int[4] filled with
+    [pops, noop_pops, edge_relaxations, successful_writes]: an `if counters != NULL:`
+    guard directly in front of each `counters[i] += 1`, NULL on every production call
+    site. Two alternatives -- hoisting the edge_relaxations add to once per pop instead
+    of once per edge, and replacing the guards with unconditional locals written back
+    once at return -- were also measured (task-3-report.md); both scored WORSE on the
+    real pristine-vs-this-build comparison than this simplest version, most likely from
+    extra live state competing with the DP's own registers across the whole function,
+    not from the counting itself. This is the version that shipped.
     """
-    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end
+    cdef int row, col, k, ch, neighbor_state_index, next_col, start, end, n_states
     cdef double log_prob, emission, current
 
     # Two array-backed FIFOs replacing the linked-list Queue, whose queue_push_tail
@@ -62,6 +73,23 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
         free(nxt)
         return -1
 
+    # Per-call scratch for the pop-time duplicate skip below, sized n_states. A state
+    # can be pushed more than once per column (once per improving relaxation into it),
+    # but its cell is only read at POP time -- so a row popped twice at the same
+    # column with an unchanged value is redoing work already done. `last_col` inits
+    # to -1, and a real column is never negative, so no separate "seen" flag is needed.
+    n_states = dynamic_table.shape[0]
+    cdef double* last_val = <double*> malloc(n_states * sizeof(double))
+    cdef int* last_col = <int*> malloc(n_states * sizeof(int))
+    if last_val == NULL or last_col == NULL:
+        free(cur)
+        free(nxt)
+        free(last_val)
+        free(last_col)
+        return -1
+    for row in range(n_states):
+        last_col[row] = -1
+
     nxt[0] = start_index
     nxt_tail = 1
 
@@ -82,21 +110,36 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
         while cur_head < cur_tail:
             row = cur[cur_head]
             cur_head += 1
+            if counters != NULL:
+                counters[0] += 1
             start = indptr[row]
             end = indptr[row + 1]
             current = dynamic_table[row, col]
 
+            if last_col[row] == col and last_val[row] == current:
+                if counters != NULL:
+                    counters[1] += 1
+                continue
+            last_col[row] = col
+            last_val[row] = current
+
             if silent[row]:  # Silent state: stay in the same column
                 for k in range(start, end):
                     neighbor_state_index = indices[k]
+                    if counters != NULL:
+                        counters[2] += 1
                     log_prob = current + weights[k]
 
                     if log_prob - dynamic_table[neighbor_state_index, col] > 1e-10 and log_prob >= threshold:
+                        if counters != NULL:
+                            counters[3] += 1
                         if cur_tail == cur_cap:
                             grown = <int*> realloc(cur, 2 * cur_cap * sizeof(int))
                             if grown == NULL:
                                 free(cur)
                                 free(nxt)
+                                free(last_val)
+                                free(last_col)
                                 return -1
                             cur = grown
                             cur_cap *= 2
@@ -109,14 +152,20 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
                 emission = emissions[row, ch]
                 for k in range(start, end):
                     neighbor_state_index = indices[k]
+                    if counters != NULL:
+                        counters[2] += 1
                     log_prob = current + weights[k] + emission
 
                     if log_prob - dynamic_table[neighbor_state_index, next_col] > 1e-10 and log_prob >= threshold:
+                        if counters != NULL:
+                            counters[3] += 1
                         if nxt_tail == nxt_cap:
                             grown = <int*> realloc(nxt, 2 * nxt_cap * sizeof(int))
                             if grown == NULL:
                                 free(cur)
                                 free(nxt)
+                                free(last_val)
+                                free(last_col)
                                 return -1
                             nxt = grown
                             nxt_cap *= 2
@@ -128,6 +177,8 @@ cdef int _viterbi_fill(int[::1] encoded_sequence,
 
     free(cur)
     free(nxt)
+    free(last_val)
+    free(last_col)
     return 0
 
 
@@ -197,8 +248,6 @@ cdef class Model(object):
         # store transitions as a map
         self.transition_map = dict()
         self.neighbors = dict()
-        # 2D matrix (After conforming the topology, create one matrix for visualization)
-        # self.transition_matrix = NULL
         self.state_to_index = dict()
 
         # Put start and end in the states
@@ -309,10 +358,6 @@ cdef class Model(object):
             else:
                 subModel._sort_states()
 
-            # indices = {subModel.states[i]: i for i in range(subModel.n_states)}
-            # subModel.start_index = indices[subModel.start]
-            # subModel.end_index = indices[subModel.end]
-
         # Start is the start state of the very fist sub-model
         self.start = self.subModels[0].start
         # End is the end state of the very last sub-model
@@ -394,12 +439,6 @@ cdef class Model(object):
         self.nbr_logp = flat_logp
         self.silent = silent
         self.emissions = emissions
-
-        # Find start and end index of repeats matcher
-        # if len(self.subModels) > 1:
-        #     repeat_matcher_model = self.subModels[1]
-        #     self.repeat_start_index = self.state_to_index[repeat_matcher_model.start]
-        #     self.repeat_end_index = self.state_to_index[repeat_matcher_model.end]
 
         self.is_baked = True
 
@@ -488,21 +527,15 @@ cdef class Model(object):
 
             if state.name.startswith("I"):
                 insert_states[repeat_unit_id].append(state)
-                # insert_states.append(state)
             elif state.name.startswith("M"):
                 match_states[repeat_unit_id].append(state)
-                # match_states.append(state)
             elif state.name.startswith("D"):
                 delete_states[repeat_unit_id].append(state)
-                # delete_states.append(state)
             else:
                 if "_start_" in state.name:
                     dummy_start_states[repeat_unit_id].append(state)
-                    # dummy_start_states.append(state)
                 if "_end_" in state.name:
                     dummy_end_states[repeat_unit_id].append(state)
-                    # dummy_end_states.append(state)
-                # assert ("start" in state.name or "end" in state.name), "State type should be in (I, M, D, start, end)"
 
         for repeat_unit_id, states in insert_states.items():
             states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
@@ -512,9 +545,6 @@ cdef class Model(object):
 
         for repeat_unit_id, states in delete_states.items():
             states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # insert_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # match_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
-        # delete_states.sort(key=lambda x: int(x.name[1:x.name.find("_")]))
 
         # 1. Model-start state
         sorted_states.append(self.start)
@@ -539,31 +569,6 @@ cdef class Model(object):
         # Model-end state
         sorted_states.append(self.end)
         self.states = sorted_states
-
-        # # 1.1 Dummy start state
-        # for dummy_start in dummy_start_states:
-        #     sorted_states.append(dummy_start)
-        #
-        # # 2. Insert 0 state (number of repeating units)
-        # for i in range(len(dummy_start_states)):
-        #     sorted_states.append(insert_states.pop(0))
-        #
-        # # 3. Delete, Match, Insert states
-        # assert (len(match_states) == len(delete_states))
-        #
-        # for i in range(len(match_states)):
-        #     sorted_states.append(delete_states[i])
-        #     sorted_states.append(match_states[i])
-        #     sorted_states.append(insert_states[i])
-        #
-        # # 4.0 Dummy end state
-        # for dummy_end in dummy_end_states:
-        #     sorted_states.append(dummy_end)
-        #
-        # # 4. End state
-        # sorted_states.append(self.end)
-        #
-        # self.states = sorted_states
 
     def dense_transition_matrix( self ):
         """Returns the dense transition matrix.
@@ -618,13 +623,7 @@ cdef class Model(object):
         -------
         None
         """
-        # other.name = "{}{}{}".format(prefix, other.name, suffix)
-        # for state in other.states:
-        #     state.name = "{}{}{}".format(prefix, state.name, suffix)
-
-        # self.subModels[self.n_subModels] = other
         self.append_subModel(other)
-        # self.subModels.append(other)
         self.n_subModels += 1
 
         # setting connections between subModels if they exist
@@ -666,20 +665,6 @@ cdef class Model(object):
         cdef char ch
         for col in range(sequence_length):
             for row in range(state_count-1):
-                # Don't believe partially mapped read (the first and last)
-                # if col == 0 and row == 0:
-                #     neighbor_states = "all_match_states"
-                #     for neighbor_state in neighbor_states:
-                #         neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
-                #         if neighbor_state_index > repeat_end_index - repeat_start_index:
-                #             continue
-                #         prob = dynamic_table[row][col] + log(self.transition_map[state][neighbor_state])
-                #
-                #         if prob - dynamic_table[neighbor_state_index][col] > 1e-10:
-                #             dynamic_table[neighbor_state_index][col] = prob
-                #             vpath_table_row[neighbor_state_index][col] = row
-                #             vpath_table_col[neighbor_state_index][col] = col
-
                 row_index = repeat_start_index + row
                 if col != 0 and dynamic_table[row][col] < self.dp_score_threshold:
                     continue
@@ -700,9 +685,7 @@ cdef class Model(object):
                 neighbor_state_index = 0
                 log_prob = 0
                 for neighbor_state in neighbor_states:
-                    #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                     neighbor_state_index = self.state_to_index[neighbor_state]
-                    #if neighbor_state_index > repeat_end_index - repeat_start_index:
                     if neighbor_state_index > repeat_end_index:
                         continue
                     log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index]
@@ -752,9 +735,7 @@ cdef class Model(object):
 
         if state.is_silent():  # Silent state: Stay in the same column
             for neighbor_state in neighbor_states:
-                #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                 neighbor_state_index = self.state_to_index[neighbor_state]
-                #if neighbor_state_index > repeat_end_index - repeat_start_index:
                 if neighbor_state_index > repeat_end_index:
                     continue
                 log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index]
@@ -766,9 +747,7 @@ cdef class Model(object):
                     vpath_table_col[zero_based_neighbor_index][col] = col
         else:  # Not a silent state: Emit a character and move to the next column
             for neighbor_state in neighbor_states:
-                #neighbor_state_index = self.state_to_index[neighbor_state] - repeat_start_index
                 neighbor_state_index = self.state_to_index[neighbor_state]
-                #if neighbor_state_index > repeat_end_index - repeat_start_index:
                 if neighbor_state_index > repeat_end_index:
                     continue
                 log_prob = dynamic_table[row][col] + self.transition_matrix[row_index][neighbor_state_index] + state.distribution[ch]
@@ -786,9 +765,16 @@ cdef class Model(object):
 
     @cython.wraparound(False)
     @cython.boundscheck(False)
-    cpdef tuple viterbi(self, sequence):
+    cpdef tuple viterbi(self, sequence, counters=None, dp_tables=None):
         """
         :param sequence: a sequence
+        :param counters: test-only. An int32 array of length 4, filled in place with
+            [pops, noop_pops, edge_relaxations, successful_writes] from _viterbi_fill.
+            None (the default, and every production call site) passes a NULL pointer
+            through -- the DP never touches a Python object for this.
+        :param dp_tables: test-only. A dict, filled in place with the raw
+            'dynamic_table'/'vpath_row'/'vpath_col'/'silent' arrays this call produced,
+            so a caller can check per-cell invariants beyond the single backtracked path.
         :return: log probability and viterbi path
         """
         if not self.is_baked:
@@ -803,9 +789,6 @@ cdef class Model(object):
         # Rows represent states and Columns represent sequence
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
-
-        # self.dynamic_table = np.ones((self.n_states, sequence_length + 1), dtype=np.double) * (-np.inf)
-        # self.dynamic_table[self.state_to_index[self.start]][0] = np.log(1)
 
         cdef double[::1,:] dynamic_table = np.full((self.n_states, sequence_length + 1), -np.inf, dtype=np.double, order='F')
         dynamic_table[self.state_to_index[self.start]][0] = log(1)
@@ -827,14 +810,28 @@ cdef class Model(object):
         cdef double threshold = self.dp_score_threshold
         cdef int start_index = self.state_to_index[self.start]
 
+        # counters is caller-allocated (see the docstring); binding it to a pointer
+        # needs the GIL, so it happens here, not inside the nogil block below.
+        cdef int[::1] counters_view
+        cdef int* counters_ptr = NULL
+        if counters is not None:
+            counters_view = counters
+            counters_ptr = &counters_view[0]
+
         cdef int fill_status = 0
         with nogil:
             fill_status = _viterbi_fill(encoded_sequence, dynamic_table, vpath_table_row,
                           vpath_table_col, indptr, indices, silent, emissions,
                           weights, threshold, sequence_length,
-                          start_index)
+                          start_index, counters_ptr)
         if fill_status != 0:
             raise MemoryError('Viterbi work queue could not be grown')
+
+        if dp_tables is not None:
+            dp_tables['dynamic_table'] = np.asarray(dynamic_table)
+            dp_tables['vpath_row'] = np.asarray(vpath_table_row)
+            dp_tables['vpath_col'] = np.asarray(vpath_table_col)
+            dp_tables['silent'] = np.asarray(silent)
 
 
         # For the last update
