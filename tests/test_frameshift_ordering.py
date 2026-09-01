@@ -77,6 +77,7 @@ class TestFrameshiftOrdering(unittest.TestCase):
 
     def test_tied_rows_do_not_depend_on_insertion_history(self):
         """Changing which tied state is seen first must not reorder the final rows."""
+        expected = ['D41_1', 'I42_1_A_LEN1']
         deletions_first = [
             _deletion_read(41, 'd1'),
             _insertion_read(42, 'i1'),
@@ -94,7 +95,8 @@ class TestFrameshiftOrdering(unittest.TestCase):
             _deletion_read(41, 'd3'),
         ]
 
-        self.assertEqual(self._ordered_states(deletions_first), self._ordered_states(insertions_first))
+        self.assertEqual(self._ordered_states(deletions_first), expected)
+        self.assertEqual(self._ordered_states(insertions_first), expected)
 
     def test_non_tied_rows_keep_the_existing_ascending_support_order(self):
         states = self._ordered_states([
