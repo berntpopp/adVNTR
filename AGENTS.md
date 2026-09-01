@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1429 |
-| `hmm/hmm.pyx` | 709 |
+| `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
 
@@ -244,9 +244,10 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **Reusing `viterbi()`'s small (41 KB) score table across calls via
   `threading.local()` is measurably SLOWER, not faster, for a reason no profiling
   tool in this sandbox could pin down.** Task 6 fix round 1 measured it directly: an
-  isolated score-only-reuse build cost +27% serial (2.34 ms -> 2.96 ms/attempt versus
-  a fresh-every-call build); the shipped combined-reuse build cost +8%. Every
-  mechanism that could plausibly explain it was checked and ruled out --
+  isolated score-only-reuse build cost +36% serial (2.16-2.18 ms fresh-every-call
+  baseline -> 2.94-2.99 ms/attempt); the shipped combined-reuse build cost +8%
+  against the same baseline (2.32-2.36 ms). Every mechanism that could plausibly
+  explain it was checked and ruled out --
   `hmm/hmm.c`'s `_viterbi_fill` body is byte-identical before/after (the DP loop's own
   codegen cannot be the cause); `/usr/bin/time -v` shows minor page faults and
   `Maximum resident set size` essentially unchanged across every variant, with the
