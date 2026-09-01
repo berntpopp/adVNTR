@@ -82,15 +82,27 @@ class PendingRead(object):
     reject_before_decode = property(_get_reject, _set_reject)
 
 
-#: Task 8's safety valve. `_viterbi_fill_core.pxi`'s threshold check is non-strict
-#: (`log_prob >= threshold`), so given non-increasing path scores every prefix of a
-#: surviving path also clears it -- the pruned reverse decode is provably bit-exact
-#: whenever the true reverse score is >= max(dp_score_threshold, fwd_logp), ties
-#: included. This valve is therefore defence-in-depth against a future change to that
-#: comparator, not load-bearing for correctness today. It re-runs the reverse decode
-#: unpruned whenever the pruned result comes within this margin of `fwd_logp`, at
-#: negligible cost: measured to fire on ~0.2% of attempts in this fork's own
-#: public-corpus measurement (see task-8-report.md).
+#: Task 8's safety valve, and load-bearing, not merely defence-in-depth: an earlier
+#: version of this comment argued the pruned reverse decode is provably bit-exact from
+#: monotonicity alone, because `_viterbi_fill_core.pxi`'s write guard's threshold half
+#: (`log_prob >= threshold`) is non-strict, so every prefix of a surviving path clears
+#: it. That argument is INCOMPLETE: the guard is two conditions ANDed together
+#: (`_viterbi_fill_core.pxi:149,176`), and the other one -- `log_prob - incumbent >
+#: 1e-10`, the relaxation epsilon -- is not covered by it. Pruning removes writes, so a
+#: pruned run's incumbent at a cell can be lower (or still -inf) than the unpruned run's
+#: incumbent at that same cell, and the epsilon guard is evaluated against whichever
+#: incumbent is actually there: a value the unpruned run rejects as a sub-epsilon,
+#: non-improving relaxation (and so never re-pushes) the pruned run can accept and
+#: re-push, because its competing incumbent was never written in the first place -- a
+#: different value AND a different push, i.e. a different visit order downstream
+#: (AGENTS.md's first Trap: "Visit order is semantic"). `--prune-reverse` is therefore
+#: NOT provably bit-exact table-wide from the threshold argument alone; it is bit-exact
+#: in practice because this margin (1e-6) is four orders of magnitude wider than the
+#: 1e-10 relaxation epsilon that creates the gap, so any attempt whose pruned score
+#: could plausibly have been perturbed by this effect re-runs unpruned here. Measured to
+#: fire on ~0.2% of attempts in this fork's own public-corpus measurement (see
+#: task-8-report.md) -- cheap enough that paying for it always is simpler than trying to
+#: prove no closer margin is ever needed.
 _SAFETY_VALVE_MARGIN = 1e-6
 
 
@@ -126,11 +138,20 @@ def _decode_one(model, pending, prune_reverse=False):
     weight is <= 0 (they are log probabilities), so a path's running score is
     non-increasing column by column: if the true best reverse path's final score beats
     `pending.logp`, every prefix of that path also beats it, so raising the threshold to
-    `pending.logp` can only prune paths that could never have won anyway. Because the DP's
-    own threshold check is non-strict (`_viterbi_fill_core.pxi`), that argument alone
-    already makes the pruned result bit-exact, ties included -- `_SAFETY_VALVE_MARGIN` is
-    defence-in-depth on top of that, re-running the reverse decode unpruned whenever the
-    pruned result comes within the margin of `pending.logp`, at negligible cost.
+    `pending.logp` can only prune paths that could never have won anyway -- but that
+    argument alone covers only the threshold half of `_viterbi_fill_core.pxi`'s write
+    guard (non-strict, `>= threshold`), not its other half, the `> 1e-10` relaxation
+    epsilon: pruning removes writes, so a pruned run's incumbent at a cell can be lower
+    than the unpruned run's, letting it accept a relaxation the unpruned run rejects as
+    sub-epsilon -- a different value and a different push, hence a different visit order
+    downstream (AGENTS.md's first Trap). `_SAFETY_VALVE_MARGIN` is what actually closes
+    that gap, not defence-in-depth on top of an already-complete proof: whenever the
+    pruned result comes within the margin of `pending.logp` -- i.e. it might actually win
+    or tie -- the reverse decode is re-run unpruned to guarantee the bit-identical
+    logp/vpath phase 3 would have produced without pruning at all. The margin (1e-6) is
+    four orders of magnitude wider than the epsilon (1e-10) that creates the gap, which is
+    why this has never been observed to matter on the public corpus, not because it is
+    unreachable.
     """
     pending.logp, pending.vpath = model.viterbi(pending.sequence)
     if prune_reverse:

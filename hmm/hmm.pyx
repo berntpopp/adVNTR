@@ -311,7 +311,7 @@ cdef class Model(object):
                         'way to reproduce the KeyError the dict lookup used to raise'
                         % index)
         if not silent[self.n_states - 2]:  # viterbi()'s final relaxation derives, not stores, its column
-            raise ValueError('states[n_states-2] (index %d) is not silent, but viterbi() derives its final relaxation assuming it is' % (self.n_states - 2))
+            raise ValueError('states[n_states-2] (index %d) is not silent, but viterbi()\'s final relaxation derives its target column assuming it is, and would silently corrupt the path' % (self.n_states - 2))
         indptr = np.cumsum(indptr).astype(np.intc)
         flat_indices = np.zeros(indptr[self.n_states], dtype=np.intc)
         flat_logp = np.zeros(indptr[self.n_states], dtype=np.double)

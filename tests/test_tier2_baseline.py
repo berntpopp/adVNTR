@@ -27,6 +27,28 @@ has_baseline = unittest.skipUnless(os.path.isfile(MANIFEST),
                                    'Tier 2 baseline not captured yet')
 
 
+class TestFixtureFileExists(unittest.TestCase):
+    """Not `@has_baseline` -- deliberately unconditional (mirrors
+    tests/test_orientation.py::TestFixtureFileExists). Every `@has_baseline` class
+    below skips without complaint if `tests/golden/tier2_manifest.json` is
+    missing -- the right idiom for a corpus artefact that may not have been
+    captured yet, but this manifest is COMMITTED (c1981d4), so `skipUnless` alone
+    would let its deletion pass silently across all 5 tests below instead of
+    failing anywhere. This test has no skip decorator, so that absence fails
+    here.
+    """
+
+    def test_the_committed_baseline_manifest_is_present(self):
+        self.assertTrue(
+            os.path.isfile(MANIFEST),
+            '%s is missing. This is a COMMITTED fixture (c1981d4), not an '
+            'external artefact yet to be captured -- its absence means it was '
+            'deleted. Regenerate with `make tier2` (or `python -m '
+            'advntr_harness.capture --tier 2 --out tests/golden --verify '
+            'tests/golden`) and `git add` it back; every `@has_baseline` class '
+            'in this module silently skips without it.' % MANIFEST)
+
+
 @has_baseline
 class TestTheBaselineSaysWhatItIs(unittest.TestCase):
     def setUp(self):

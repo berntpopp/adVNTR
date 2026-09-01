@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1429 |
+| `advntr/vntr_finder.py` | 1406 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -269,6 +269,11 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   it was before Task 6, and costs nothing to keep that way (task-6-report.md's fix
   round 1 section has the full ablation matrix). Do not "simplify" this by folding
   the score table back into the reused scratch without re-measuring serial first.
+  `hmm/hmm.pyx`'s `_traceback` keeps its own malloc'd path buffer fresh-per-call
+  (never `_thread_scratch`) for the same class of reason -- but this ablation only
+  ever measured the score table; the traceback buffer's cost was never separately
+  profiled, so treat that as an informed inference from the same mechanism, not an
+  independent measurement of its own.
 
 ## Never
 

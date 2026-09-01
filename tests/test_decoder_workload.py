@@ -48,6 +48,27 @@ has_fixtures = unittest.skipUnless(
     'Tier 1 fixtures not captured (python -m advntr_harness.capture --tier 1 --out tests/golden)')
 
 
+class TestFixtureFileExists(unittest.TestCase):
+    """Not `@has_fixtures` -- deliberately unconditional (mirrors
+    tests/test_orientation.py::TestFixtureFileExists, the idiom this class exists
+    to bring here). Every `@has_fixtures` class in this module skips without
+    complaint if `tests/golden/tier1_reads.txt.gz` is missing -- the right thing
+    for a file an external capture run may not have produced yet, but this one is
+    COMMITTED, so `skipUnless` alone would let it going missing pass silently
+    across every test below instead of failing anywhere. This test has no skip
+    decorator, so that absence fails here.
+    """
+
+    def test_the_committed_tier1_reads_fixture_is_present(self):
+        self.assertTrue(
+            os.path.isfile(READS),
+            '%s is missing. This is a COMMITTED fixture, not an external corpus '
+            'file yet to be captured -- its absence means it was deleted. '
+            'Regenerate with `python -m advntr_harness.capture --tier 1 --out '
+            'tests/golden` and `git add` it back; every `@has_fixtures` class in '
+            'this module silently skips without it.' % READS)
+
+
 def _first_fixture(model_key):
     """The first Tier 1 fixture sequence captured under `model_key`.
 
@@ -309,13 +330,21 @@ class TestBakeRejectsANonSilentFinalRelaxationSource(unittest.TestCase):
 
 
 class TestSourceNoLongerUsesThePerAttemptGilBoundPatterns(unittest.TestCase):
-    """Task 6: per-attempt score-table allocation, dict-based sequence encoding, and
-    the O(n^2) `vpath.insert(0, ...)` traceback all held the GIL every decode attempt.
-    Reading the SOURCE (not just behaviour) is deliberate: a new path added beside a
-    still-present old one would pass any behavioural test while leaving the GIL-bound
-    cost exactly where it was. Written and run BEFORE the implementation
-    (task-6-report.md Steps 1-2): all three assertions below FAIL against the
-    pre-Task-6 source, each for the reason its own message names, not by accident.
+    """Task 6: dict-based sequence encoding and the O(n^2) `vpath.insert(0, ...)`
+    traceback both held the GIL every decode attempt. Reading the SOURCE (not just
+    behaviour) is deliberate: a new path added beside a still-present old one would
+    pass any behavioural test while leaving the GIL-bound cost exactly where it
+    was. Written and run BEFORE the implementation (task-6-report.md Steps 1-2):
+    both assertions below FAIL against the pre-Task-6 source, each for the reason
+    its own message names, not by accident.
+
+    A third assertion used to live here, for the score table's per-attempt
+    allocation. It does not belong in a class about patterns the source no longer
+    uses: fix round 1 (644d399) deliberately RESTORED per-attempt allocation for
+    the score table specifically, on measured evidence -- see
+    TestScoreTableAllocatesFreshEveryCall below, which also explains why the old
+    assertion here (`assertNotIn('np.full((self.n_states, 2)', ...)`) was
+    dangerously misleading rather than merely obsolete.
     """
 
     @classmethod
@@ -335,10 +364,51 @@ class TestSourceNoLongerUsesThePerAttemptGilBoundPatterns(unittest.TestCase):
         self.assertNotIn('insert(0,', self.viterbi_body,
                          'viterbi() still rebuilds vpath with O(n^2) insert(0, ...)')
 
-    def test_viterbi_does_not_allocate_a_fresh_score_table_per_call(self):
-        self.assertNotIn('np.full((self.n_states, 2)', self.viterbi_body,
-                         'viterbi() still allocates dynamic_table fresh every attempt '
-                         'instead of reusing per-thread scratch')
+
+class TestScoreTableAllocatesFreshEveryCall(unittest.TestCase):
+    """The inverse of the assertion that used to live in
+    TestSourceNoLongerUsesThePerAttemptGilBoundPatterns above, and the fix for a
+    reviewer finding against this branch: that old assertion was written for
+    39728b2, when `_thread_scratch` reused BOTH the vpath and score tables, and it
+    checked for the ABSENCE of `np.full((self.n_states, 2)`. Task 6 fix round 1
+    (644d399) deliberately REVERTED the score table to fresh-per-call, root-caused
+    on measured evidence: an isolated score-only-reuse build cost +36% serial
+    (2.16-2.18 ms/attempt fresh-every-call baseline -> 2.94-2.99 ms/attempt),
+    against the shipped vpath-only-reuse build's ~0% by comparison
+    (task-6-report.md's fix round 1 ablation matrix; AGENTS.md Traps entry,
+    "Reusing viterbi()'s small (41 KB) score table..."). That Traps entry ends:
+    "Do not 'simplify' this by folding the score table back into the reused
+    scratch without re-measuring serial first."
+
+    The old assertion kept passing after 644d399 -- but only by accident, because
+    the fresh allocator's name changed from `np.full` to `np.empty`, not because
+    the score table was reused again. Its failure message ("...instead of reusing
+    per-thread scratch") would have told the next reader to do exactly what the
+    Traps entry forbids. This one asserts the shipped invariant directly -- a
+    fresh per-call allocation for `dynamic_table` -- via a regex covering either
+    allocator, so restoring `np.full(..., -np.inf)` (which would also retire the
+    manual reset at hmm.pyx:632-634) keeps this passing; only routing
+    `dynamic_table` through `_thread_scratch` fails it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'hmm', 'hmm.pyx')
+        with open(path) as handle:
+            source = handle.read()
+        cls.viterbi_body = source[
+            source.index('cpdef tuple viterbi(self, sequence, min_threshold=None):'):]
+
+    def test_the_score_table_is_a_fresh_per_call_allocation_not_thread_scratch(self):
+        self.assertRegexpMatches(
+            self.viterbi_body,
+            r"dynamic_table = np\.(empty|full)\(\(self\.n_states, 2\)",
+            'viterbi() no longer allocates dynamic_table fresh every attempt -- '
+            'reusing the score table across calls measured +36% SLOWER, not '
+            'faster, for a reason profiling in this sandbox could not pin down '
+            '(AGENTS.md Traps; task-6-report.md fix round 1 ablation matrix); '
+            're-measure serial ms/attempt before reusing it')
 
 
 class TestEncodedSequenceStillRaisesOnAnUndeclaredSymbol(unittest.TestCase):
@@ -423,6 +493,53 @@ class TestPerThreadScratchAcrossDifferentModelShapesOnOneThread(unittest.TestCas
         for _ in range(5):
             self.assertEqual(small_model.viterbi(small_read), small_reference)
             self.assertEqual(big_model.viterbi(big_read), big_reference)
+
+
+class TestBakeProducesTheEndIndexIdentity(unittest.TestCase):
+    """`viterbi()`'s `end_index = self.n_states - 1` (hmm.pyx:660) replaced the
+    pre-Task-6 `state_to_index[self.subModels[self.n_subModels-1].end]`, valid iff
+    `states[n_states-1] is self.end`. bake() asserts its other two derived
+    identities -- the positional inverse of `state_to_index` (hmm.pyx:271-275) and
+    `silent[n_states-2]` (hmm.pyx:313-314) -- but not this one, and the LOC ratchet
+    (hmm.pyx 693/693, hmm/_viterbi_fill_core.pxi 199/199, both asserted EQUAL to
+    their ceilings by tests/test_ratchets.py) forbids funding a new assertion
+    inside hmm.pyx without deleting an equal number of lines elsewhere. A wrong
+    topology would silently read the wrong row and return a mismatched
+    `(end_index, State)` from the `-inf` stub at hmm.pyx:663, so this is asserted
+    test-side instead, against both baked golden models (hg19 and hg38) and a
+    synthetic one -- `_sort_states`'s own docstring already claims the invariant
+    ("bake() ... relies on the resulting self.states always ending in the model's
+    own end state"), and this is what checks that claim rather than trusting it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hg19_model, _fp19, _score19 = _ModelCache(MODELS).get('hg19', 151)
+        cls.hg38_model, _fp38, _score38 = _ModelCache(MODELS).get('hg38', 151)
+
+    def test_the_baked_hg19_golden_model_ends_on_its_own_end_state(self):
+        self.assertIs(
+            self.hg19_model.states[self.hg19_model.n_states - 1], self.hg19_model.end,
+            'states[n_states-1] is not model.end -- hmm.pyx:660s end_index = '
+            'n_states - 1 would address the wrong row')
+
+    def test_the_baked_hg38_golden_model_ends_on_its_own_end_state(self):
+        self.assertIs(
+            self.hg38_model.states[self.hg38_model.n_states - 1], self.hg38_model.end,
+            'states[n_states-1] is not model.end -- hmm.pyx:660s end_index = '
+            'n_states - 1 would address the wrong row')
+
+    def test_a_synthetic_model_ends_on_its_own_end_state(self):
+        model = Model(name='t-end-index-identity-guard')
+        mid = State(None, name='mid')
+        model.add_state(mid)
+        model.set_transition(model.start, mid, 1.0)
+        model.set_transition(mid, model.end, 1.0)
+        model.bake(sort_by_name=True)
+        self.assertIs(
+            model.states[model.n_states - 1], model.end,
+            'states[n_states-1] is not model.end -- hmm.pyx:660s end_index = '
+            'n_states - 1 would address the wrong row')
 
 
 if __name__ == '__main__':
