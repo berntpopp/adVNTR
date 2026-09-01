@@ -7,7 +7,7 @@ that runs without the GIL.
 import os
 import unittest
 
-from build_config import CYTHON_DIRECTIVES, EXTENSION_SOURCES
+from build_config import CYTHON_DIRECTIVES, DEV_EXTENSION_SOURCES, PRODUCTION_EXTENSION_SOURCES
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,11 +53,42 @@ class TestExtensionSources(unittest.TestCase):
     def test_pomegranate_is_not_compiled(self):
         """It is unreachable at runtime and does not build on gcc >= 14, which made
         `setup.py build_ext` fail outright. See FORK.md."""
-        for pattern in EXTENSION_SOURCES:
-            self.assertNotIn('pomegranate', pattern)
+        for sources in (PRODUCTION_EXTENSION_SOURCES, DEV_EXTENSION_SOURCES):
+            for pattern in sources:
+                self.assertNotIn('pomegranate', pattern)
 
     def test_hmm_is_compiled(self):
-        self.assertIn('hmm/*.pyx', EXTENSION_SOURCES)
+        self.assertIn('hmm/hmm.pyx', PRODUCTION_EXTENSION_SOURCES)
+        self.assertIn('hmm/hmm.pyx', DEV_EXTENSION_SOURCES)
+
+    def test_production_sources_are_enumerated_not_globbed(self):
+        """A `hmm/*.pyx` glob here would ship whatever .pyx files exist in hmm/ at
+        build time -- including any future test-only module, exactly the failure mode
+        FORK.md's 2.0.1 entry already records once (find_packages() shipping
+        advntr_harness and scripts/ -- development tooling -- into the installed egg,
+        caught only by installing in Docker and importing from outside the repo).
+        An enumerated list can't silently absorb a new file the way a glob can."""
+        for pattern in PRODUCTION_EXTENSION_SOURCES:
+            self.assertNotIn('*', pattern)
+
+    def test_instrumented_module_is_not_in_the_shipped_package(self):
+        """Task 3 fix round 2, Finding B: hmm/hmm_instrumented.pyx is test-only
+        (counters + a skip_enabled toggle for tests/test_decoder_workload.py). Shipping
+        it means `pip install .` ships test-only code to every user."""
+        for pattern in PRODUCTION_EXTENSION_SOURCES:
+            self.assertNotIn('instrumented', pattern)
+
+    def test_dev_build_still_compiles_the_instrumented_module(self):
+        """The production/dev split must not silently drop test coverage: the dev/CI
+        build (setup_hmm.py, `make build`) still needs hmm_instrumented.pyx so
+        tests/test_decoder_workload.py (via advntr_harness/workload.py) has something
+        to load."""
+        self.assertIn('hmm/hmm_instrumented.pyx', DEV_EXTENSION_SOURCES)
+
+    def test_dev_sources_are_a_superset_of_production_sources(self):
+        """Everything shipped must also be exercised by the build tests run against --
+        the dev build should never compile LESS than what ships."""
+        self.assertTrue(set(PRODUCTION_EXTENSION_SOURCES).issubset(set(DEV_EXTENSION_SOURCES)))
 
 
 class TestBuildFilesAgree(unittest.TestCase):
@@ -69,6 +100,22 @@ class TestBuildFilesAgree(unittest.TestCase):
                 source = handle.read()
             self.assertIn('from build_config import', source,
                           '%s does not use the shared build config' % name)
+
+    def test_setup_py_builds_only_production_sources(self):
+        """The installable package must import PRODUCTION_EXTENSION_SOURCES, and must
+        NOT import DEV_EXTENSION_SOURCES -- that would ship hmm_instrumented.pyx (and
+        anything else added there later) to every `pip install .` (Finding B)."""
+        with open(os.path.join(REPO, 'setup.py')) as handle:
+            source = handle.read()
+        self.assertIn('PRODUCTION_EXTENSION_SOURCES', source)
+        self.assertNotIn('DEV_EXTENSION_SOURCES', source)
+
+    def test_setup_hmm_py_builds_dev_sources(self):
+        """The dev/CI build must import DEV_EXTENSION_SOURCES so it still compiles the
+        test-only instrumented module."""
+        with open(os.path.join(REPO, 'setup_hmm.py')) as handle:
+            source = handle.read()
+        self.assertIn('DEV_EXTENSION_SOURCES', source)
 
     def test_setuptools_is_imported_before_cython_in_setup(self):
         """Cython picks its Extension base class depending on whether setuptools is
