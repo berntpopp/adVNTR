@@ -82,17 +82,15 @@ class PendingRead(object):
     reject_before_decode = property(_get_reject, _set_reject)
 
 
-#: Task 8's safety valve. A pruned reverse decode is exact whenever the true reverse
-#: score is on the far side of `threshold` from `fwd_logp` (see `_decode_one`'s
-#: docstring for the monotonicity argument), but right at the boundary a relaxation
-#: blocked only by the tightened threshold could change which of two equal-scoring
-#: paths a tie resolves to -- undetectable from the pruned logp alone. Re-running
-#: unpruned whenever the pruned reverse score comes within this margin of `fwd_logp`
-#: (i.e. could plausibly win or tie) restores byte-identical output for exactly the
-#: attempts where the choice of vpath/logp actually reaches `SelectedRead`. Measured
-#: to fire on ~0.2% of attempts in this fork's own public-corpus measurement (see
-#: task-8-report.md) -- cheap enough that paying for it always is simpler than trying
-#: to prove no closer margin is ever needed.
+#: Task 8's safety valve. `_viterbi_fill_core.pxi`'s threshold check is non-strict
+#: (`log_prob >= threshold`), so given non-increasing path scores every prefix of a
+#: surviving path also clears it -- the pruned reverse decode is provably bit-exact
+#: whenever the true reverse score is >= max(dp_score_threshold, fwd_logp), ties
+#: included. This valve is therefore defence-in-depth against a future change to that
+#: comparator, not load-bearing for correctness today. It re-runs the reverse decode
+#: unpruned whenever the pruned result comes within this margin of `fwd_logp`, at
+#: negligible cost: measured to fire on ~0.2% of attempts in this fork's own
+#: public-corpus measurement (see task-8-report.md).
 _SAFETY_VALVE_MARGIN = 1e-6
 
 
@@ -128,10 +126,11 @@ def _decode_one(model, pending, prune_reverse=False):
     weight is <= 0 (they are log probabilities), so a path's running score is
     non-increasing column by column: if the true best reverse path's final score beats
     `pending.logp`, every prefix of that path also beats it, so raising the threshold to
-    `pending.logp` can only prune paths that could never have won anyway. When the pruned
-    result comes within `_SAFETY_VALVE_MARGIN` of `pending.logp` -- i.e. it might actually
-    win or tie -- the reverse decode is re-run unpruned to guarantee the bit-identical
-    logp/vpath phase 3 would have produced without pruning at all.
+    `pending.logp` can only prune paths that could never have won anyway. Because the DP's
+    own threshold check is non-strict (`_viterbi_fill_core.pxi`), that argument alone
+    already makes the pruned result bit-exact, ties included -- `_SAFETY_VALVE_MARGIN` is
+    defence-in-depth on top of that, re-running the reverse decode unpruned whenever the
+    pruned result comes within the margin of `pending.logp`, at negligible cost.
     """
     pending.logp, pending.vpath = model.viterbi(pending.sequence)
     if prune_reverse:
