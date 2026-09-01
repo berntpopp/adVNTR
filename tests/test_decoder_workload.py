@@ -1,17 +1,23 @@
 """Workload characterization for the Viterbi DP -- how much of its work is wasted.
 
-`hmm/hmm.pyx` `_viterbi_fill` pushes a state onto the DP work queue once per improving
-relaxation into it, but only reads its cell at POP time. A state relaxed twice within
-one column (by two different sources, before either push is popped) is therefore popped
-twice: the first pop does real work, the second re-reads the exact same value the first
-pop already finalised, recomputes identical scores for every neighbour, and writes
-nothing. That is what the pop-time duplicate skip (the `last_col`/`last_val` check
-immediately after `current = dynamic_table[row, col]`) exists to short-circuit.
+`hmm/_viterbi_fill_core.pxi` (included by both hmm/hmm.pyx and hmm/hmm_instrumented.pyx,
+see Task 3 fix round 1 / task-3-report.md) pushes a state onto the DP work queue once
+per improving relaxation into it, but only reads its cell at POP time. A state relaxed
+twice within one column (by two different sources, before either push is popped) is
+therefore popped twice: the first pop does real work, the second re-reads the exact
+same value the first pop already finalised, recomputes identical scores for every
+neighbour, and writes nothing. That is what the pop-time duplicate skip (the
+`last_col`/`last_val` check immediately after `current = dynamic_table[row, col]`)
+exists to short-circuit.
 
 This module measures that waste through `decode_with_counters`
-(advntr_harness/workload.py), the thin wrapper around the test-only instrumentation
-surface on `Model.viterbi` (`counters=`/`dp_tables=`, both default `None` and untouched
-by every production call site, which still says `model.viterbi(sequence)`).
+(advntr_harness/workload.py), which drives `hmm.hmm_instrumented.decode_instrumented`
+-- a SEPARATE compiled extension from production `hmm.hmm`, built from the identical
+`_viterbi_fill_core.pxi` source with `DEF INSTRUMENTED = True` instead of False, so this
+module's counting and its `skip_enabled` toggle cost the production build nothing (not
+a guard, not a branch -- see hmm/_viterbi_fill_core.pxi's docstring for why a runtime
+guard, measured, was rejected). Production's `Model.viterbi(sequence)` takes no
+counters/dp_tables/skip_enabled arguments at all.
 """
 import gzip
 import os
@@ -60,24 +66,51 @@ class TestDecoderWorkload(unittest.TestCase):
         at POP time, so every pop after the first re-reads an already-final value,
         recomputes identical scores and writes nothing. Measured: 41-45% of pops.
 
-        The task-3 brief's verbatim assertion here was
-        `self.assertEqual(counters['noop_pops'], 0)`. That cannot pass and stay true to
-        its own docstring above: `noop_pops` counts a real property of the *DP's push
-        multiplicity* (a row pushed twice in one column before either push is popped),
-        which the pop-time skip does not change -- it removes the WORK a redundant pop
-        does (its neighbour loop), not the pop itself. Pushes/pops are governed only by
-        successful relaxations, and test_write_count_invariant_holds below plus Step 4's
-        before/after equality check prove that count is identical with or without the
-        skip. So `noop_pops` is the same nonzero ~41-45% fraction before and after the
-        fix; asserting it falls in the measured range is the honest version of this
-        test -- see task-3-report.md for the run that confirmed the literal assertion
-        can never pass.
+        This is the brief's Step 1 assertion, verbatim, and it now passes for real: with
+        the skip_enabled toggle from Task 3 fix round 1 (Finding 1), `noop_pops` is
+        redefined to count pops that REACH the edge loop despite an unchanged cell --
+        the work the skip eliminates -- rather than every pop matching the redundant
+        condition regardless of outcome. Against skip_enabled=True (the default, and
+        exactly what production does), such a pop always `continue`s before that
+        counting site is reached, so this is 0 by construction, not by a runtime check
+        that happens to always be false. See test_disabling_the_skip_reproduces_the_
+        measured_noop_fraction below for the skip-disabled measurement this task's
+        first round reported instead of shipping this assertion; that round's own
+        report (task-3-report.md) explains why the ORIGINAL `noop_pops` definition
+        could never satisfy this literal check.
         """
         counters = decode_with_counters(self.model, self.read)
+        self.assertEqual(counters['noop_pops'], 0)
+
+    def test_disabling_the_skip_reproduces_the_measured_noop_fraction(self):
+        """With the skip's `continue` disabled (skip_enabled=False), every pop that
+        matches the redundant condition falls through into the edge loop instead of
+        short-circuiting -- reproducing the ORIGINAL, pre-fix decoder's behaviour
+        exactly, and with it the 41-45% figure the brief's docstring names."""
+        counters = decode_with_counters(self.model, self.read, skip_enabled=False)
         self.assertGreater(counters['pops'], 0)
         fraction = counters['noop_pops'] / float(counters['pops'])
         self.assertGreaterEqual(fraction, 0.30, 'noop_pops fraction %.3f' % fraction)
         self.assertLessEqual(fraction, 0.55, 'noop_pops fraction %.3f' % fraction)
+
+    def test_write_count_is_unchanged_with_the_skip_disabled(self):
+        """Step 4's "independently assert the successful-write count is unchanged",
+        as a committed regression test rather than a one-time manual edit (Task 3 fix
+        round 1, Finding 2): the same read, through the same compiled fill, with only
+        `skip_enabled` toggled. `pops` and `successful_writes` must be identical either
+        way -- proof the skip changes only which pops do wasted work, never a push or a
+        write -- while the wasted work itself (`edge_relaxations`, and `noop_pops`
+        specifically) must be strictly smaller with the skip enabled.
+        """
+        skip_on = decode_with_counters(self.model, self.read, skip_enabled=True)
+        skip_off = decode_with_counters(self.model, self.read, skip_enabled=False)
+
+        self.assertEqual(skip_on['pops'], skip_off['pops'])
+        self.assertEqual(skip_on['successful_writes'], skip_off['successful_writes'])
+
+        self.assertEqual(skip_on['noop_pops'], 0)
+        self.assertGreater(skip_off['noop_pops'], 0)
+        self.assertLess(skip_on['edge_relaxations'], skip_off['edge_relaxations'])
 
     def test_write_count_invariant_holds(self):
         """`pops <= successful_writes + 1`: every push comes from one successful write
@@ -87,10 +120,11 @@ class TestDecoderWorkload(unittest.TestCase):
         into the final column (`col == sequence_length`) are written (and counted as
         successful_writes) but never popped inside `_viterbi_fill`. Measured on this
         read: 605110 writes, 602080 pops, a gap of 3031 -- exactly the undrained
-        final-column states, not a counting bug."""
-        counters = decode_with_counters(self.model, self.read)
-        self.assertGreater(counters['pops'], 0)
-        self.assertLessEqual(counters['pops'], counters['successful_writes'] + 1)
+        final-column states, not a counting bug. Holds regardless of skip_enabled."""
+        for skip_enabled in (True, False):
+            counters = decode_with_counters(self.model, self.read, skip_enabled=skip_enabled)
+            self.assertGreater(counters['pops'], 0)
+            self.assertLessEqual(counters['pops'], counters['successful_writes'] + 1)
 
     def test_edge_relaxations_exceed_successful_writes(self):
         """Every successful write came from an edge relaxation that passed the
@@ -100,11 +134,17 @@ class TestDecoderWorkload(unittest.TestCase):
         self.assertGreater(counters['edge_relaxations'], counters['successful_writes'])
 
     def test_production_call_is_unaffected(self):
-        """`model.viterbi(sequence)` -- no counters, no dp_tables -- is exactly what
-        every production call site uses, and must keep returning what it always has."""
+        """`model.viterbi(sequence)` -- no counters, no dp_tables, no skip_enabled --
+        is exactly what every production call site uses, and must keep returning what
+        it always has. Production's Model.viterbi does not even ACCEPT those keywords
+        any more (Task 3 fix round 1): passing them is a TypeError, not a silent no-op,
+        which is the point -- there is nothing left in the production build for a stray
+        instrumentation call to silently do nothing to."""
         logp, vpath = self.model.viterbi(self.read)
         self.assertIsInstance(logp, float)
         self.assertGreater(len(vpath), 0)
+
+        self.assertRaises(TypeError, self.model.viterbi, self.read, counters=None)
 
 
 if __name__ == '__main__':

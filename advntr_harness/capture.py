@@ -87,8 +87,13 @@ TIER2_FILES = (
 #: Sources whose content defines decoder behaviour. Digested into every manifest so a
 #: baseline carries proof of which kernel produced it -- `git stash list` proves nothing
 #: about HEAD, working-tree diffs, or whether the imported .so is stale.
-KERNEL_SOURCES = ('hmm/hmm.pyx', 'hmm/base.pyx', 'hmm/base.pxd', 'hmm/cqueue.pxd',
-                  'hmm/queue.c')
+# hmm/_viterbi_fill_core.pxi holds the actual DP fill (Task 3 fix round 1): hmm.pyx
+# `include`s it, so a change there changes production behaviour exactly as a change to
+# hmm.pyx itself would, and belongs in this list for the same reason. hmm_instrumented.pyx
+# is deliberately NOT here -- it is test-only and never linked into production, so its
+# content cannot affect what a baseline's kernel provenance is claiming to describe.
+KERNEL_SOURCES = ('hmm/hmm.pyx', 'hmm/_viterbi_fill_core.pxi', 'hmm/base.pyx',
+                  'hmm/base.pxd', 'hmm/cqueue.pxd', 'hmm/queue.c')
 
 
 def kernel_provenance(repo_root=None):

@@ -32,4 +32,13 @@ CYTHON_DIRECTIVES = {
 # bindings that pass long* where int* is expected, which made `setup.py build_ext` fail
 # outright and so blocked building this package from source at all. The source tree stays
 # for reference. See FORK.md.
+#
+# The glob compiles every .pyx under hmm/ as its own extension module, which is what
+# produces TWO modules from the Viterbi DP source rather than one: hmm/hmm.pyx (module
+# hmm.hmm, production) and hmm/hmm_instrumented.pyx (module hmm.hmm_instrumented,
+# test-only) each `include` hmm/_viterbi_fill_core.pxi -- a .pxi, so this glob does not
+# also try to compile it standalone -- with a different `DEF INSTRUMENTED`, so `make
+# build` produces both from one hand-maintained DP source without any extra wiring here.
+# See _viterbi_fill_core.pxi's docstring for why two compiled modules exist instead of
+# one runtime flag (Task 3 fix round 1; task-3-report.md).
 EXTENSION_SOURCES = ["hmm/*.pyx"]

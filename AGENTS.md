@@ -55,7 +55,13 @@ does not mention muscle in its first line.
 
 ```
 advntr/            The tool. genotype -fs lives in vntr_finder.py + genome_analyzer.py.
-hmm/               The live HMM backend (Cython). hmm.pyx is the Viterbi decoder.
+hmm/               The live HMM backend (Cython). hmm.pyx is the Viterbi decoder,
+                   compiled to module hmm.hmm (production). Its DP fill lives in
+                   _viterbi_fill_core.pxi, `include`-d a second time by
+                   hmm_instrumented.pyx (module hmm.hmm_instrumented, test-only) with a
+                   different compile-time DEF -- counters and a skip_enabled toggle
+                   compile in there and nowhere else. See _viterbi_fill_core.pxi's
+                   docstring for why (a runtime guard, measured, was rejected).
 pomegranate/       DEAD. Not compiled, not supported. See FORK.md.
 advntr_harness/    Equivalence harness. Not shipped; imported by tests.
 tests/golden/      Committed fixtures + manifests. The decoder's regression net.
@@ -81,7 +87,7 @@ you touch one, leave it smaller than you found it:
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1429 |
-| `hmm/hmm.pyx` | 882 |
+| `hmm/hmm.pyx` | 713 |
 | `advntr/hmm_utils.py` | 900 |
 
 `pomegranate/` is excluded: not compiled, not maintained.

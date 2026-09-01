@@ -53,5 +53,5 @@ gate: no-upstream-remote loc-ratchet build test coverage-ratchet
 
 clean:
 	# NOT hmm/*.c -- hmm/queue.c is a hand-written tracked source, not generated.
-	rm -f hmm/*.so hmm/hmm.c hmm/base.c .coverage .coverage-now
+	rm -f hmm/*.so hmm/hmm.c hmm/hmm_instrumented.c hmm/base.c .coverage .coverage-now
 	rm -rf build
