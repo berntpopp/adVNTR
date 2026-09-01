@@ -6,8 +6,8 @@ real end-to-end equivalence lives in tests/test_tier3_occurrence.py.
 import threading
 import unittest
 
-from advntr.read_selection import (PendingRead, decode_in_threads, decode_pending,
-                                   decode_serially, resolve_thread_count)
+from advntr.read_selection import (PendingRead, _decode_one, decode_in_threads,
+                                   decode_pending, decode_serially, resolve_thread_count)
 
 
 class _StubModel(object):
@@ -213,6 +213,127 @@ class TestOnlyTheWinningTracebackIsRetained(unittest.TestCase):
         for item in pending:
             retained = [path for path in (item.vpath, item.rev_vpath) if path is not None]
             self.assertEqual(len(retained), 1)
+
+
+class _PruneAwareModel(object):
+    """Records every `viterbi()` call as (sequence, min_threshold) and returns a
+    caller-chosen score per (sequence, whether a threshold was passed).
+
+    `min_threshold=None` on the signature mirrors the real `hmm.hmm.Model.viterbi` --
+    a stub without it would raise TypeError the moment `_decode_one` passes the kwarg,
+    which is the point: this stub only accepts what production accepts.
+    """
+
+    def __init__(self, forward_score, pruned_reverse_score, unpruned_reverse_score):
+        self.calls = []
+        self._forward_score = forward_score
+        self._pruned_reverse_score = pruned_reverse_score
+        self._unpruned_reverse_score = unpruned_reverse_score
+
+    def viterbi(self, sequence, min_threshold=None):
+        self.calls.append((sequence, min_threshold))
+        if sequence == 'FWD':
+            return self._forward_score, [(0, 'FWD')]
+        score = self._unpruned_reverse_score if min_threshold is None else self._pruned_reverse_score
+        return score, [(0, 'REV')]
+
+
+class TestPruneReverseFlag(unittest.TestCase):
+    """`_decode_one`'s `prune_reverse` path (Task 8, `--prune-reverse`).
+
+    hmm.pyx's real DP is what actually prunes; these tests are about the CONTROL FLOW
+    around it -- that the forward logp becomes the reverse call's floor, that a plain
+    `viterbi(sequence)` call is untouched when the flag is off, and that the safety
+    valve re-runs unpruned exactly when the pruned result could plausibly matter. The
+    real relaxation-count and byte-identity evidence lives in
+    tests/test_prune_reverse.py, against the compiled kernel.
+    """
+
+    def test_flag_off_never_passes_a_threshold(self):
+        """Byte-identical-by-construction: with the flag off, both viterbi() calls are
+        exactly what pre-Task-8 `_decode_one` made -- one positional argument, nothing
+        else -- so every existing caller (prune_reverse defaulting to False) is
+        untouched."""
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-50.0,
+                                 unpruned_reverse_score=-50.0)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=False)
+
+        self.assertEqual(model.calls, [('FWD', None), ('REV', None)])
+
+    def test_flag_on_floors_the_reverse_call_at_the_forward_logp(self):
+        """The reverse decode's threshold is `pending.logp` -- max()'d with the model's
+        own dp_score_threshold inside hmm.hmm.Model.viterbi itself (hmm.pyx), not here;
+        `_decode_one` only ever needs to pass the forward score."""
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-50.0,
+                                 unpruned_reverse_score=-999.0)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=True)
+
+        self.assertEqual(model.calls, [('FWD', None), ('REV', -10.0)])
+        self.assertEqual(pending.rev_logp, -50.0)
+
+    def test_the_safety_valve_reruns_unpruned_when_the_pruned_score_is_close(self):
+        """A pruned result within _SAFETY_VALVE_MARGIN of the forward score might
+        actually win or tie -- exactly the case pruning cannot be trusted to get
+        byte-identical, so the reverse decode is re-run with no threshold at all, and
+        that unpruned call's result is what phase 3 must see."""
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-10.0,
+                                 unpruned_reverse_score=-9.5)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=True)
+
+        self.assertEqual(model.calls, [('FWD', None), ('REV', -10.0), ('REV', None)])
+        self.assertEqual(pending.rev_logp, -9.5)
+        self.assertIsNone(pending.vpath)  # reverse (-9.5) beats forward (-10.0)
+
+    def test_the_safety_valve_does_not_fire_on_a_decisive_forward_win(self):
+        """The common case (AGENTS.md: reverse wins 77 of 29,998 corpus reads) must NOT
+        pay for a third decode."""
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-500.0,
+                                 unpruned_reverse_score=-500.0)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=True)
+
+        self.assertEqual(len(model.calls), 2)
+
+    def test_the_safety_valve_margin_is_exclusive(self):
+        """`pruned_rev_logp > fwd_logp - 1e-6` -- exactly AT the margin does not fire."""
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-10.0 - 1e-6,
+                                 unpruned_reverse_score=-999.0)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=True)
+
+        self.assertEqual(len(model.calls), 2, 'valve fired exactly at the margin')
+
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-10.0 - 5e-7,
+                                 unpruned_reverse_score=-999.0)
+        pending = PendingRead(sequence='FWD', reverse='REV', query_name='r0')
+
+        _decode_one(model, pending, prune_reverse=True)
+
+        self.assertEqual(len(model.calls), 3, 'valve did not fire just inside the margin')
+
+    def test_threaded_decoding_honours_the_flag_too(self):
+        """`decode_pending`/`decode_in_threads` must forward `prune_reverse` to every
+        worker, not just `decode_serially`."""
+        pending_reads = [PendingRead(sequence='FWD', reverse='REV', query_name='r%d' % i)
+                         for i in range(6)]
+        model = _PruneAwareModel(forward_score=-10.0, pruned_reverse_score=-50.0,
+                                 unpruned_reverse_score=-999.0)
+
+        decode_pending(model, pending_reads, n_threads=3, prune_reverse=True)
+
+        for call in model.calls:
+            if call[0] == 'REV':
+                self.assertEqual(call[1], -10.0)
+        for pending in pending_reads:
+            self.assertEqual(pending.rev_logp, -50.0)
 
 
 if __name__ == '__main__':

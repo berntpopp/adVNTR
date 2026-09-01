@@ -90,6 +90,10 @@ def main():
                                        help='VNTR models file [%s]' % settings.ILLUMINA_DEFAULT_MODELS_FILE)
     genotype_others_group.add_argument('-t', '--threads', type=int, metavar='<int>', default=1,
                                        help='number of threads [%(default)s]')
+    genotype_others_group.add_argument('--prune-reverse', action='store_true', default=False,
+                                       help='prune the reverse-complement decode against the '
+                                            'forward score (default-off; produces identical '
+                                            'genotype calls -- see AGENTS.md Tier B)')
     genotype_others_group.add_argument('-u', '--update', action='store_true', default=False,
                                        help='set this flag to iteratively update the model')
     genotype_others_group.add_argument('-vid', '--vntr_id', type=str, metavar='<text>', default=None,

@@ -46,3 +46,11 @@ USE_REF_ALIGNMENT = True
 
 MIN_READ_LENGTH = None
 
+#: Default-off (Task 8, `--prune-reverse`; Tier B, AGENTS.md's two-tier rule). Written
+#: from `args.prune_reverse` in advntr/advntr_commands.py the same way `-t/--threads`
+#: writes CORES; read (snapshotted before phase 2) in
+#: advntr/vntr_finder.py:select_illumina_reads, never inside read_selection.py itself --
+#: see that module's docstring for why a per-call bool, not a global read mid-decode,
+#: is what keeps phase 2 thread-safe.
+PRUNE_REVERSE_DECODE = False
+

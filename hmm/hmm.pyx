@@ -588,9 +588,11 @@ cdef class Model(object):
 
     @cython.wraparound(False)
     @cython.boundscheck(False)
-    cpdef tuple viterbi(self, sequence):
+    cpdef tuple viterbi(self, sequence, min_threshold=None):
         """
         :param sequence: a sequence
+        :param min_threshold: per-call floor OR'd with self.dp_score_threshold via max() --
+            never assigned to self (thread-unsafe; see read_selection.py:_decode_one).
         :return: log probability and viterbi path
 
         Production only -- no counters, no dp_tables, no skip_enabled toggle. That
@@ -606,13 +608,11 @@ cdef class Model(object):
         # Rows represent states and Columns represent sequence
         cdef int sequence_length = len(sequence)
         cdef int[::1] encoded_sequence = self.get_encoded_sequence(sequence)
-
         # Score table: fresh every call -- see _thread_scratch's docstring.
         cdef double[::1,:] dynamic_table = np.empty((self.n_states, 2), dtype=np.double, order='F')
         # Per-thread (never self -- read_selection.py) scratch from _thread_scratch,
         # amortising the ~1.56 MB vpath allocation across calls on this thread.
         cdef int[::1,:] vpath_table_row = _thread_scratch(self.n_states, sequence_length + 1)
-
         cdef int row, col, ch
 
         # Hoist the flat tables into locals so the DP can run with the GIL released:
@@ -622,7 +622,7 @@ cdef class Model(object):
         cdef unsigned char[::1] silent = self.silent
         cdef double[:, ::1] emissions = self.emissions
         cdef double[::1] weights = self.nbr_logp
-        cdef double threshold = self.dp_score_threshold
+        cdef double threshold = self.dp_score_threshold if min_threshold is None else max(self.dp_score_threshold, min_threshold)
         cdef int start_index = self.state_to_index[self.start]
 
         cdef int fill_status = 0

@@ -38,6 +38,29 @@ has_fixture = unittest.skipUnless(
     'tests/data/synthetic_revcomp.bam missing -- run scripts/make_revcomp_fixture.py')
 
 
+class TestFixtureFileExists(unittest.TestCase):
+    """Not `@has_fixture` -- deliberately unconditional (Task 8 controller ruling).
+
+    Every class below it is `skipUnless(os.path.isfile(BAM), ...)`, which mirrors the
+    Tier 1/Tier 3 idiom for an EXTERNAL file the corpus may or may not supply -- a
+    reasonable thing to skip on. This fixture is different: it is COMMITTED
+    (tests/data/synthetic_revcomp.bam, added by 6f51ba8). A skip for a committed file
+    means only one thing -- someone deleted it -- and `skipUnless` alone turns that into
+    a silent green run instead of a loud failure, which is exactly the "a green skip is
+    not evidence" trap this plan's Task 8 exists to close. This test has no skip
+    decorator, so its absence fails here, not just quietly downgrades every other class
+    in this module to skipped.
+    """
+
+    def test_the_committed_fixture_is_present(self):
+        self.assertTrue(
+            os.path.isfile(BAM),
+            '%s is missing. This is a COMMITTED fixture (6f51ba8), not an external '
+            'corpus file -- its absence means it was deleted, not merely unavailable. '
+            'Regenerate with `python scripts/make_revcomp_fixture.py` and `git add` it '
+            'back; every other class in this module silently skips without it.' % BAM)
+
+
 def _read_records(path):
     """(query_name -> uppercase sequence) for every record in the fixture BAM."""
     import pysam
@@ -87,6 +110,53 @@ class TestReverseDecodeIsGuarded(unittest.TestCase):
         -150, while the forward-only value does not clear it."""
         selected = self.selected[0]
         self.assertGreater(selected.logp, -len(selected.sequence))
+
+
+@has_fixture
+class TestReverseDecodeIsGuardedWithPruningOn(unittest.TestCase):
+    """Task 8's Tier B fixture-stratum demonstration: this is the ONE fixture in the
+    repo where the reverse decode actually wins (AGENTS.md's "reverse_complement_wins"
+    note; the corpus itself never exercises it -- see the module docstring), so it is
+    also the one case that forces `--prune-reverse`'s safety valve to fire. `_decode_one`
+    prunes the reverse decode to threshold=max(dp_score_threshold, fwd_logp) = fwd_logp
+    (-311.27, comfortably above dp_score_threshold), which is BELOW the true reverse
+    score (-21.11) -- so the pruned result still clears fwd_logp, the valve re-runs the
+    reverse decode unpruned, and the outcome must be byte-identical to
+    TestReverseDecodeIsGuarded above. Every assertion here is a literal copy of that
+    class's, run with the flag on instead of off.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._original_flag = settings.PRUNE_REVERSE_DECODE
+        settings.PRUNE_REVERSE_DECODE = True
+        finder, _reference = build_finder(DB)
+        cls.selected = finder.select_illumina_reads(BAM, [])
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.PRUNE_REVERSE_DECODE = cls._original_flag
+
+    def test_exactly_one_read_is_selected(self):
+        self.assertEqual(len(self.selected), 1)
+
+    def test_the_selected_read_is_the_target(self):
+        self.assertEqual(self.selected[0].query_name, TARGET_NAME)
+
+    def test_the_selected_sequence_is_the_reverse_complement_of_the_stored_seq(self):
+        stored_seq = _read_records(BAM)[TARGET_NAME]
+        expected = str(Seq(stored_seq).reverse_complement()).upper()
+        self.assertEqual(self.selected[0].sequence, expected)
+
+    def test_the_selected_logp_beats_the_length_floor(self):
+        selected = self.selected[0]
+        self.assertGreater(selected.logp, -len(selected.sequence))
+
+    def test_the_selected_logp_matches_the_unpruned_decode_exactly(self):
+        """Not just "close" -- the safety valve exists to make pruning invisible to
+        phase 3, so this must be the identical IEEE-754 value TestReverseDecodeIsGuarded
+        measures with the flag off, not merely a read with the same query_name."""
+        self.assertEqual(self.selected[0].logp, -21.109968289314292)
 
 
 class TestPaddingIsRejectedForTheIntendedReason(unittest.TestCase):

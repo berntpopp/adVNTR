@@ -42,7 +42,7 @@ _instrumented = _load_instrumented()
 decode_instrumented = _instrumented.decode_instrumented
 
 
-def decode_with_counters(model, sequence, skip_enabled=True):
+def decode_with_counters(model, sequence, skip_enabled=True, min_threshold=None):
     """Decode one sequence against the INSTRUMENTED build; return {counter_name: count}.
 
     `skip_enabled=True` (default) reproduces the shipped production behaviour --
@@ -51,6 +51,11 @@ def decode_with_counters(model, sequence, skip_enabled=True):
     `continue`, leaving every other relaxation decision identical, so a caller can
     directly compare "skip on" against "skip off" on the SAME compiled fill (see
     hmm/hmm_instrumented.pyx and hmm/_viterbi_fill_core.pxi).
+
+    `min_threshold`, when not None, mirrors production's per-call floor (Task 8,
+    `advntr/read_selection.py:_decode_one`'s `--prune-reverse` path): OR'd with
+    `model.dp_score_threshold` via max(), so this measures exactly the pruning
+    production would apply to the same call.
 
     `pops <= successful_writes + 1`: every push comes from exactly one successful
     relaxation and every push is popped at most once inside `_viterbi_fill` (the +1 is
@@ -69,5 +74,6 @@ def decode_with_counters(model, sequence, skip_enabled=True):
     identity is the empirical signature that the skip changes only which pops do
     wasted work, never what gets written or pushed.
     """
-    counters = decode_instrumented(model, sequence, skip_enabled=skip_enabled)
+    counters = decode_instrumented(model, sequence, skip_enabled=skip_enabled,
+                                   min_threshold=min_threshold)
     return dict(zip(COUNTER_NAMES, (int(value) for value in counters)))

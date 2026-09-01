@@ -324,7 +324,8 @@ class TestSourceNoLongerUsesThePerAttemptGilBoundPatterns(unittest.TestCase):
                             'hmm', 'hmm.pyx')
         with open(path) as handle:
             cls.source = handle.read()
-        cls.viterbi_body = cls.source[cls.source.index('cpdef tuple viterbi(self, sequence):'):]
+        cls.viterbi_body = cls.source[
+            cls.source.index('cpdef tuple viterbi(self, sequence, min_threshold=None):'):]
 
     def test_sequence_encoding_is_not_a_dict_lookup(self):
         self.assertNotIn("{'A':0", self.source,

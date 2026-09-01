@@ -10,7 +10,9 @@ The shape is three phases:
 2. **Parallel, decoder only.** Two `viterbi` calls per read. Safe because `Model.viterbi`
    assigns nothing to `self` -- verified -- so one baked model is shared read-only, and
    every DP buffer is a per-call local. The DP releases the GIL, which is what makes
-   threads worth anything here at all.
+   threads worth anything here at all. Task 8's `--prune-reverse` keeps this true: the
+   tighter DP threshold it uses for the reverse call is an ordinary per-call argument to
+   `viterbi`, never a write to the shared model.
 3. **Serial, in original fetch order.** Apply the rejection rules, emit every log line,
    and build the `SelectedRead` list.
 
@@ -80,7 +82,21 @@ class PendingRead(object):
     reject_before_decode = property(_get_reject, _set_reject)
 
 
-def _decode_one(model, pending):
+#: Task 8's safety valve. A pruned reverse decode is exact whenever the true reverse
+#: score is on the far side of `threshold` from `fwd_logp` (see `_decode_one`'s
+#: docstring for the monotonicity argument), but right at the boundary a relaxation
+#: blocked only by the tightened threshold could change which of two equal-scoring
+#: paths a tie resolves to -- undetectable from the pruned logp alone. Re-running
+#: unpruned whenever the pruned reverse score comes within this margin of `fwd_logp`
+#: (i.e. could plausibly win or tie) restores byte-identical output for exactly the
+#: attempts where the choice of vpath/logp actually reaches `SelectedRead`. Measured
+#: to fire on ~0.2% of attempts in this fork's own public-corpus measurement (see
+#: task-8-report.md) -- cheap enough that paying for it always is simpler than trying
+#: to prove no closer margin is ever needed.
+_SAFETY_VALVE_MARGIN = 1e-6
+
+
+def _decode_one(model, pending, prune_reverse=False):
     """Decode both orientations, keeping only the traceback that wins.
 
     Both log-probabilities are kept: phase 3 still makes the orientation decision, and it
@@ -105,22 +121,39 @@ def _decode_one(model, pending):
 
     The test below is exactly phase 3's (`vntr_finder.py:1141`), so the survivor is always
     the traceback phase 3 goes on to select -- including the tie, where `<` keeps forward.
+
+    `prune_reverse` (Task 8, default-off `--prune-reverse`): if set, the reverse decode
+    runs with `min_threshold=pending.logp` -- `hmm.hmm.Model.viterbi`'s per-call floor,
+    OR'd with the model's own `dp_score_threshold` via max(). Sound because every DP edge
+    weight is <= 0 (they are log probabilities), so a path's running score is
+    non-increasing column by column: if the true best reverse path's final score beats
+    `pending.logp`, every prefix of that path also beats it, so raising the threshold to
+    `pending.logp` can only prune paths that could never have won anyway. When the pruned
+    result comes within `_SAFETY_VALVE_MARGIN` of `pending.logp` -- i.e. it might actually
+    win or tie -- the reverse decode is re-run unpruned to guarantee the bit-identical
+    logp/vpath phase 3 would have produced without pruning at all.
     """
     pending.logp, pending.vpath = model.viterbi(pending.sequence)
-    pending.rev_logp, pending.rev_vpath = model.viterbi(pending.reverse)
+    if prune_reverse:
+        pending.rev_logp, pending.rev_vpath = model.viterbi(
+            pending.reverse, min_threshold=pending.logp)
+        if pending.rev_logp > pending.logp - _SAFETY_VALVE_MARGIN:
+            pending.rev_logp, pending.rev_vpath = model.viterbi(pending.reverse)
+    else:
+        pending.rev_logp, pending.rev_vpath = model.viterbi(pending.reverse)
     if pending.logp < pending.rev_logp:
         pending.vpath = None
     else:
         pending.rev_vpath = None
 
 
-def decode_serially(model, pending_reads):
+def decode_serially(model, pending_reads, prune_reverse=False):
     for pending in pending_reads:
         if pending.needs_decoding:
-            _decode_one(model, pending)
+            _decode_one(model, pending, prune_reverse)
 
 
-def decode_in_threads(model, pending_reads, n_threads):
+def decode_in_threads(model, pending_reads, n_threads, prune_reverse=False):
     """Decode across `n_threads` worker threads, preserving nothing but correctness.
 
     Order is irrelevant here -- each worker writes only into its own PendingRead -- so
@@ -130,6 +163,10 @@ def decode_in_threads(model, pending_reads, n_threads):
     The first worker exception is re-raised in the caller and the batch is discarded;
     a thread that dies silently would otherwise leave `logp` as None and produce a
     confusing failure far from the cause.
+
+    `prune_reverse` is a plain bool, snapshotted by the caller (see `decode_pending`) --
+    every worker reads the same immutable value, so passing it here adds no shared
+    mutable state beyond what `n_threads` itself already required.
     """
     work = [pending for pending in pending_reads if pending.needs_decoding]
     if not work:
@@ -147,7 +184,7 @@ def decode_in_threads(model, pending_reads, n_threads):
             if index >= len(work):
                 return
             try:
-                _decode_one(model, work[index])
+                _decode_one(model, work[index], prune_reverse)
             except BaseException as exc:  # recorded, re-raised on the calling thread
                 errors.append(exc)
                 return
@@ -175,12 +212,12 @@ def resolve_thread_count(configured):
     return count if count > 1 else 1
 
 
-def decode_pending(model, pending_reads, n_threads):
+def decode_pending(model, pending_reads, n_threads, prune_reverse=False):
     """Phase 2. Serial at one thread, so `-t 1` runs no threading machinery at all."""
     if n_threads <= 1:
-        decode_serially(model, pending_reads)
+        decode_serially(model, pending_reads, prune_reverse)
     else:
-        decode_in_threads(model, pending_reads, n_threads)
+        decode_in_threads(model, pending_reads, n_threads, prune_reverse)
 
 
 def emit(message):

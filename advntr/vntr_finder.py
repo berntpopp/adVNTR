@@ -1117,10 +1117,10 @@ class VNTRFinder:
         # ---- Phase 2: the only parallel part. `Model.viterbi` assigns nothing to
         # `self`, so one baked model is shared read-only and every DP buffer is a
         # per-call local; the DP releases the GIL, which is what makes this worth
-        # anything. Snapshot the thread count so a concurrent change to the global
-        # cannot alter it midway.
+        # anything. Snapshot both globals (thread count, Task 8's prune-reverse flag)
+        # so a concurrent change to either cannot alter phase 2 midway.
         n_threads = read_selection.resolve_thread_count(settings.CORES)
-        read_selection.decode_pending(hmm, pending_reads, n_threads)
+        read_selection.decode_pending(hmm, pending_reads, n_threads, bool(settings.PRUNE_REVERSE_DECODE))
 
         # ---- Phase 3: serial, in original fetch order.
         for pending in pending_reads:

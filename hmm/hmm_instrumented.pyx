@@ -30,7 +30,7 @@ DEF INSTRUMENTED = True
 include "_viterbi_fill_core.pxi"
 
 
-def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
+def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None, min_threshold=None):
     """Run one instrumented Viterbi fill and return its counters.
 
     :param model: a baked hmm.hmm.Model (or anything exposing the same public baked
@@ -46,6 +46,9 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
         check per-cell invariants beyond the single backtracked path. No 'vpath_col'
         (Task 4): the predecessor column is derived, not stored -- see
         _viterbi_fill_core.pxi's docstring.
+    :param min_threshold: mirrors production Model.viterbi's per-call floor (Task 8) --
+        OR'd with model.dp_score_threshold via max(), so a caller can measure the exact
+        pruning production applies (advntr_harness/workload.py's decode_with_counters).
     :return: an int32 numpy array [pops, noop_pops, edge_relaxations, successful_writes].
     """
     if not model.is_baked:
@@ -72,7 +75,7 @@ def decode_instrumented(model, sequence, skip_enabled=True, dp_tables=None):
     cdef unsigned char[::1] silent = model.silent
     cdef double[:, ::1] emissions = model.emissions
     cdef double[::1] weights = model.nbr_logp
-    cdef double threshold = model.dp_score_threshold
+    cdef double threshold = model.dp_score_threshold if min_threshold is None else max(model.dp_score_threshold, min_threshold)
 
     counters = np.zeros(4, dtype=np.intc)
     cdef int[::1] counters_view = counters
