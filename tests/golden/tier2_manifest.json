@@ -1,0 +1,119 @@
+{
+  "baseline_kind": "pristine equivalence baseline", 
+  "files": [
+    {
+      "assembly": "hg38", 
+      "attempt_count": 1878, 
+      "eligible_count": 939, 
+      "input_digest": "b47b9751c1894efe008062adc415247b47aa8d29e879cb1523cd2496df3ea552", 
+      "model_key": "hg38@151", 
+      "output_digest": "a439e03f59c31a25601c4e9d1e9ba015aacbe8f26186915b82c69c6b73cd879e", 
+      "read_length": 151, 
+      "source_file": "example_40cf_hg38_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 63906, 
+      "eligible_count": 31953, 
+      "input_digest": "fadda1665f8cdc9c1834594e7a6c3896533bcd67270d20da667619a400a608ee", 
+      "model_key": "hg19@149", 
+      "output_digest": "b2fa5babbadc3b58334f89962ba469e5536cfc9a84817a14bfc628bc878ff98d", 
+      "read_length": 149, 
+      "source_file": "example_6449_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 25216, 
+      "eligible_count": 12608, 
+      "input_digest": "89dadf163971a95126d3f547bf0fa308054b2cef8178503d7b56dfcc6a13f817", 
+      "model_key": "hg19@151", 
+      "output_digest": "e4535ba5b75834cf5ffb637d3703a9507d13db1953935a9bab6b9680495d4cd0", 
+      "read_length": 151, 
+      "source_file": "example_66bf_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 101238, 
+      "eligible_count": 50619, 
+      "input_digest": "2d37a4f3e570523b2705c8ea1617a7192fd13b181a57faad9a86a44e21028d37", 
+      "model_key": "hg19@149", 
+      "output_digest": "c25b45930347b310a27a29f381178c3aeb2565b29608c23d136f96f827421ae1", 
+      "read_length": 149, 
+      "source_file": "example_6c28_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 3234, 
+      "eligible_count": 1617, 
+      "input_digest": "11411bbeb57b301b87de14f3b68f6cb05497e976ab5bcfd8cf243a1b8730989f", 
+      "model_key": "hg19@151", 
+      "output_digest": "e771969ea797d4ce8ed1c09b7a9884f51e1beeb570daf33978335fcc15d41577", 
+      "read_length": 151, 
+      "source_file": "example_7a61_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 18952, 
+      "eligible_count": 9476, 
+      "input_digest": "f7894997ecba1d56536ed581f756988fb477cc61ecc0b732512c313696b895ac", 
+      "model_key": "hg19@149", 
+      "output_digest": "166a215fe604ae232b9bb15c464deda629a5a4cd3cec7a8fc0a1bb02dd2ef134", 
+      "read_length": 149, 
+      "source_file": "example_a5c1_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 12784, 
+      "eligible_count": 6392, 
+      "input_digest": "a3963b4a999fde0d096f8f16539fd804969a6fbfe30b642b5631b771691a202e", 
+      "model_key": "hg19@151", 
+      "output_digest": "dd52b336cb58395effcf43e4c96dcf10a45d99b9bf18fd537ed1080ae1ed42fb", 
+      "read_length": 151, 
+      "source_file": "example_b178_hg19_subset.bam"
+    }, 
+    {
+      "assembly": "hg19", 
+      "attempt_count": 60888, 
+      "eligible_count": 30444, 
+      "input_digest": "52c92ac13890a549584810d06930b9dac97698cd7cb993342b729f0cc9e5b5b1", 
+      "model_key": "hg19@151", 
+      "output_digest": "66b441af7af7b1c7444f4d517fabd10391a9fc923101386f48d20e5b826aabb4", 
+      "read_length": 151, 
+      "source_file": "example_dfc3_hg19_subset.bam"
+    }
+  ], 
+  "global_digest": "efb8b2d18d34fd54b023fb08dad3d383caef3a5820f14492e7c3685f5aba4119", 
+  "kernel_provenance": {
+    "hmm/base.pxd": "6aca8f9953f89e93", 
+    "hmm/base.pyx": "2ab32120313301ab", 
+    "hmm/cqueue.pxd": "bae2495f20274170", 
+    "hmm/hmm.pyx": "e87fabf5e8633235", 
+    "hmm/queue.c": "4bd388222b50c954", 
+    "loaded_so": "90d29c838164ddaa"
+  }, 
+  "model_contexts": {
+    "hg19@149": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f2d66468d7de", 
+      "n_states": 2553, 
+      "read_length": 149, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }, 
+    "hg19@151": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f4223f1451e6", 
+      "n_states": 2565, 
+      "read_length": 151, 
+      "vntr_digest": "af1beb219fa3c676bd8cae966ca5b18b9c46320bc62c5071b369c1db3b8c4811"
+    }, 
+    "hg38@151": {
+      "csr_digest": "pre-csr", 
+      "dp_score_threshold_hex": "c076f4223f1451e6", 
+      "n_states": 2565, 
+      "read_length": 151, 
+      "vntr_digest": "558ca93170418c10e923d64b13e539acc15cbab5edafc725e37e2d11dd640c74"
+    }
+  }, 
+  "note": "Captured from this fork's pristine kernel (05fd98a, see FORK.md) before any decoder change; kernel_provenance records the digests that prove it. Contrast tests/golden/tier3_manifest.json, whose baseline_kind and note say the opposite (post-rewrite regression baseline, does not prove equivalence with pristine).", 
+  "tier": 2
+}
