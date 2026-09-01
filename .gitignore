@@ -32,6 +32,8 @@ adVNTR-Filtering
 
 # Planning artifacts (docs/ is the published Sphinx site)
 .planning/
+# Isolated feature worktrees
+.worktrees/
 # Harness scratch output
 tests/golden/*.actual
 tests/golden/*.actual.gz
