@@ -3,6 +3,7 @@
 The harness is what every later correctness claim rests on, so it gets tested before it
 is trusted.
 """
+import copy
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import unittest
 
 import pysam
 
+from advntr_harness.capture import verify
 from advntr_harness.extract import derive_read_length, eligible_reads, resolve_contig
 from advntr_harness.fingerprint import (comparable_fingerprint, input_attestation,
                                         model_fingerprint)
@@ -261,6 +263,76 @@ class TestVerifyPreflight(unittest.TestCase):
             shutil.rmtree(baseline)
 
         self.assertEqual(status, 0)
+
+
+def _clean_manifest():
+    """A small, self-contained, synthetic pair -- not derived from any corpus. Two files
+    so a single-file perturbation can be told apart from a file-set change, and a full
+    model_contexts entry because comparable_fingerprint() indexes every one of its four
+    keys directly and raises KeyError on a partial fixture."""
+    return {
+        'tier': 2,
+        'kernel_provenance': {'hmm/hmm.pyx': 'deadbeefcafebabe'},
+        'model_contexts': {
+            'hg19@151': {'n_states': 2565, 'read_length': 151,
+                         'dp_score_threshold_hex': 'c076f4223f1451e6',
+                         'vntr_digest': 'digest0', 'csr_digest': 'pre-csr'},
+        },
+        'files': [
+            {'source_file': 'a.bam', 'eligible_count': 1, 'attempt_count': 2,
+             'input_digest': 'ia', 'output_digest': 'oa', 'read_length': 151,
+             'model_key': 'hg19@151'},
+            {'source_file': 'b.bam', 'eligible_count': 3, 'attempt_count': 6,
+             'input_digest': 'ib', 'output_digest': 'ob', 'read_length': 151,
+             'model_key': 'hg19@151'},
+        ],
+        'global_digest': 'global0',
+    }
+
+
+class TestVerify(unittest.TestCase):
+    """`verify()` is the pure function every equivalence claim rests on -- `make tier2`
+    compiles down to one call to it. A gate nobody has seen fail is a gate nobody knows
+    works (tests/test_ratchets.py's docstring makes the same point about a different
+    ratchet), so this proves it catches a mismatch in two distinct shapes -- a single
+    per-file output_digest and the whole-baseline global_digest -- not just that it stays
+    quiet on a clean pair. See task-2-report.md's Phase B section for the equivalent
+    demonstration run directly against the committed tests/golden/tier2_manifest.json.
+    """
+
+    def test_an_identical_pair_reports_no_problems(self):
+        baseline = _clean_manifest()
+        self.assertEqual(verify(baseline, copy.deepcopy(baseline)), [])
+
+    def test_a_perturbed_per_file_output_digest_is_caught(self):
+        baseline = _clean_manifest()
+        actual = copy.deepcopy(baseline)
+        actual['files'][0]['output_digest'] = 'deadbeefdeadbeef'
+
+        problems = verify(baseline, actual)
+
+        self.assertEqual(problems, ["a.bam: output_digest 'oa' -> 'deadbeefdeadbeef'"])
+
+    def test_a_perturbed_global_digest_is_caught(self):
+        baseline = _clean_manifest()
+        actual = copy.deepcopy(baseline)
+        actual['global_digest'] = 'global1'
+
+        problems = verify(baseline, actual)
+
+        self.assertEqual(problems, ["global digest 'global0' -> 'global1'"])
+
+    def test_restoring_the_perturbation_passes_again(self):
+        """The other half of the demonstration: a perturbation caught above must stop
+        being caught once undone -- a gate that never goes green again would be useless
+        even though it fails correctly."""
+        baseline = _clean_manifest()
+        actual = copy.deepcopy(baseline)
+        actual['files'][0]['output_digest'] = 'deadbeefdeadbeef'
+        self.assertTrue(verify(baseline, actual))
+
+        actual['files'][0]['output_digest'] = baseline['files'][0]['output_digest']
+        self.assertEqual(verify(baseline, actual), [])
 
 
 if __name__ == '__main__':
