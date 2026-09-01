@@ -62,6 +62,27 @@ TIER1_FILES = (
 #: Canonical identity used for Tier 1 expected rows. See the module docstring.
 TIER1_SOURCE = 'tier1'
 
+#: Tier 2 source files.
+#:
+#: `os.walk`ing VNtyper's `tests/data` -- what this used to do -- also picks up
+#: `remapped/` (46 BAMs) and `derived/`: 681,526 eligible reads, 1,363,052 decode attempts,
+#: 23.1 h at the pristine 61.1 ms/attempt. Restricted to the top-level public corpus (these
+#: eight files) it is 137,656 reads, 275,312 attempts, 4.67 h -- the figure the spec itself
+#: budgets ("~4.8 h"). The recursive walk also makes the Tier 2 digest depend on the
+#: contents of a directory outside this repo, so a baseline captured on one machine could
+#: never be verified on another. Order matches what the old walk produced for these files
+#: (sorted).
+TIER2_FILES = (
+    'example_40cf_hg38_subset.bam',
+    'example_6449_hg19_subset.bam',
+    'example_66bf_hg19_subset.bam',
+    'example_6c28_hg19_subset.bam',
+    'example_7a61_hg19_subset.bam',
+    'example_a5c1_hg19_subset.bam',
+    'example_b178_hg19_subset.bam',
+    'example_dfc3_hg19_subset.bam',
+)
+
 
 #: Sources whose content defines decoder behaviour. Digested into every manifest so a
 #: baseline carries proof of which kernel produced it -- `git stash list` proves nothing
@@ -170,12 +191,8 @@ def discover(data_dir, tier):
     if tier == 1:
         return [os.path.join(data_dir, name) for name in TIER1_FILES
                 if os.path.isfile(os.path.join(data_dir, name))]
-    found = []
-    for root, _dirs, files in os.walk(data_dir):
-        for name in sorted(files):
-            if name.endswith('.bam'):
-                found.append(os.path.join(root, name))
-    return sorted(found)
+    return [os.path.join(data_dir, name) for name in TIER2_FILES
+            if os.path.isfile(os.path.join(data_dir, name))]
 
 
 class _ModelCache(object):
