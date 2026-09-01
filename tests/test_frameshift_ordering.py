@@ -5,6 +5,7 @@ which the mutation dictionary first saw them.
 """
 import logging
 import unittest
+from cStringIO import StringIO
 
 from advntr import settings
 from advntr.reference_vntr import ReferenceVNTR
@@ -38,6 +39,24 @@ class _LogCapture(logging.Handler):
 
     def emit(self, record):
         self.messages.append(record.getMessage())
+
+
+class _RootLoggerScope(object):
+    def __init__(self, level, handlers):
+        self.level = level
+        self.handlers = handlers
+
+    def __enter__(self):
+        self.logger = logging.getLogger()
+        self.original_level = self.logger.level
+        self.original_handlers = list(self.logger.handlers)
+        self.logger.handlers = list(self.handlers)
+        self.logger.setLevel(self.level)
+        return self.logger
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.logger.handlers = self.original_handlers
+        self.logger.setLevel(self.original_level)
 
 
 def _vpath(state_names):
@@ -98,6 +117,24 @@ class TestFrameshiftOrdering(unittest.TestCase):
         frameshifts = self.finder.find_frameshift_from_selected_reads(reads)
         return [state for state, _count, _coverage, _pval in frameshifts]
 
+    def _run_low_coverage_realignment_logging(self):
+        settings.USE_REF_ALIGNMENT = True
+        try:
+            reference = ReferenceVNTR(2, 'A' * 60, 100, 'chr1', None, None)
+            reference.init_from_xml(['A' * 60, 'C' * 60, 'G' * 60], 'TTTTTTTTTT', 'GGGGGGGGGG')
+            finder = _RealignmentVisibilityFinder(reference, is_frameshift_mode=True)
+            finder.hmm = type(str('_ReadLength151'), (object,), {'read_length_used_to_build_model': 151})()
+
+            capture = _LogCapture()
+            with _RootLoggerScope(logging.INFO, [capture]):
+                finder.find_frameshift_from_selected_reads([
+                    _matching_read(60, 'r1'),
+                    _matching_read(60, 'r2'),
+                ])
+            return capture.messages
+        finally:
+            settings.USE_REF_ALIGNMENT = False
+
     def test_tied_rows_do_not_depend_on_insertion_history(self):
         """Changing which tied state is seen first must not reorder the final rows."""
         expected = ['D41_1', 'I42_1_A_LEN1']
@@ -133,32 +170,28 @@ class TestFrameshiftOrdering(unittest.TestCase):
 
     def test_logs_once_when_repeat_unit_realignment_is_inactive_below_three_units(self):
         """Dropping the low-coverage visibility log would hide a real disabled branch."""
-        settings.USE_REF_ALIGNMENT = True
-        reference = ReferenceVNTR(2, 'A' * 60, 100, 'chr1', None, None)
-        reference.init_from_xml(['A' * 60, 'C' * 60, 'G' * 60], 'TTTTTTTTTT', 'GGGGGGGGGG')
-        finder = _RealignmentVisibilityFinder(reference, is_frameshift_mode=True)
-        finder.hmm = type(str('_ReadLength151'), (object,), {'read_length_used_to_build_model': 151})()
-
-        handler = _LogCapture()
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        root_logger.setLevel(logging.INFO)
-        try:
-            finder.find_frameshift_from_selected_reads([
-                _matching_read(60, 'r1'),
-                _matching_read(60, 'r2'),
-            ])
-        finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
-            settings.USE_REF_ALIGNMENT = False
-
-        inactive_messages = [message for message in handler.messages
+        inactive_messages = [message for message in self._run_low_coverage_realignment_logging()
                              if 'repeat-unit realignment is inactive' in message]
         self.assertEqual(len(inactive_messages), 1)
         self.assertIn('151', inactive_messages[0])
         self.assertIn('60', inactive_messages[0])
+
+    def test_preexisting_root_handlers_stay_silent_while_capture_observes_the_info_log(self):
+        """Appending our handler instead of isolating handlers would leak noise to stderr."""
+        leaked_stream = StringIO()
+        noisy_handler = logging.StreamHandler(leaked_stream)
+        root_logger = logging.getLogger()
+        original_handlers = list(root_logger.handlers)
+        root_logger.addHandler(noisy_handler)
+        try:
+            capture_messages = self._run_low_coverage_realignment_logging()
+            self.assertEqual(leaked_stream.getvalue(), '')
+            self.assertEqual(list(root_logger.handlers), original_handlers + [noisy_handler])
+        finally:
+            root_logger.removeHandler(noisy_handler)
+        inactive_messages = [message for message in capture_messages
+                             if 'repeat-unit realignment is inactive' in message]
+        self.assertEqual(len(inactive_messages), 1)
 
 
 if __name__ == '__main__':
