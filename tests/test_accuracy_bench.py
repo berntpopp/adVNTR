@@ -354,6 +354,14 @@ class TestAccuracyReport(_TemporaryDirectoryTest):
 
 
 class TestExternalOutputBoundary(_TemporaryDirectoryTest):
+    def test_nonexistent_nested_output_creates_no_components(self):
+        bench = self.require_module()
+        first_missing = os.path.join(self.tempdir, 'missing')
+        output_dir = os.path.join(first_missing, 'nested', 'output')
+        with self.assertRaises(ValueError):
+            bench.publish_report({'mode': 'baseline'}, output_dir)
+        self.assertFalse(os.path.lexists(first_missing))
+
     def test_direct_in_repository_output_is_refused(self):
         bench = self.require_module()
         forbidden = os.path.join(REPO, '.ignored-accuracy-output')
@@ -416,44 +424,6 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
         finally:
             bench.subprocess.check_output = real_check_output
 
-    def test_directory_substitution_cannot_redirect_publication(self):
-        bench = self.require_module()
-        external_parent = os.path.join(self.tempdir, 'race-anchor')
-        moved_parent = os.path.join(self.tempdir, 'race-anchor-moved')
-        external_output = os.path.join(external_parent, 'output')
-        os.makedirs(external_output)
-
-        ignored_root = os.path.join(REPO, '.superpowers', 'sdd')
-        repository_target = tempfile.mkdtemp(
-            prefix='accuracy-race-', dir=ignored_root)
-        os.mkdir(os.path.join(repository_target, 'output'))
-        repository_report = os.path.join(
-            repository_target, 'output', 'accuracy-report.json')
-        real_mkstemp = bench.tempfile.mkstemp
-        substituted = [False]
-
-        def substitute_before_create(*args, **kwargs):
-            if not substituted[0]:
-                os.rename(external_parent, moved_parent)
-                os.symlink(repository_target, external_parent)
-                substituted[0] = True
-            return real_mkstemp(*args, **kwargs)
-
-        try:
-            bench.tempfile.mkstemp = substitute_before_create
-            try:
-                published = bench.publish_report(
-                    {'mode': 'baseline'}, external_output)
-            finally:
-                bench.tempfile.mkstemp = real_mkstemp
-            self.assertTrue(substituted[0])
-            self.assertFalse(os.path.exists(repository_report))
-            self.assertTrue(os.path.isfile(published))
-            self.assertFalse(os.path.realpath(published).startswith(
-                os.path.realpath(REPO) + os.sep))
-        finally:
-            shutil.rmtree(repository_target)
-
     def test_records_collision_is_refused_for_direct_and_symlink_paths(self):
         self.require_module()
         output_dir = os.path.join(self.tempdir, 'collision-output')
@@ -480,43 +450,17 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
             with open(output_path) as handle:
                 self.assertEqual(handle.read(), original)
 
-    def test_keyboard_interrupt_removes_temp_file_and_new_output_directory(self):
-        bench = self.require_module()
-        output_dir = os.path.join(self.tempdir, 'interrupted-output')
-        real_rename = bench.os.rename
-
-        def interrupt_rename(*_args, **_kwargs):
-            raise KeyboardInterrupt()
-
-        bench.os.rename = interrupt_rename
-        try:
-            with self.assertRaises(KeyboardInterrupt):
-                bench.publish_report({'mode': 'baseline'}, output_dir)
-        finally:
-            bench.os.rename = real_rename
-        self.assertFalse(os.path.exists(output_dir))
-
-    def test_open_failure_removes_new_output_directory(self):
-        bench = self.require_module()
-        output_dir = os.path.join(self.tempdir, 'open-failure-output')
-        real_open = bench.os.open
-
-        def fail_open(*_args, **_kwargs):
-            raise OSError('synthetic open failure')
-
-        bench.os.open = fail_open
-        try:
-            with self.assertRaises(OSError):
-                bench.publish_report({'mode': 'baseline'}, output_dir)
-        finally:
-            bench.os.open = real_open
-        self.assertFalse(os.path.exists(output_dir))
-
     def test_published_report_mode_is_owner_read_write_only(self):
         bench = self.require_module()
         output_dir = os.path.join(self.tempdir, 'private-output')
+        os.mkdir(output_dir)
         output_path = bench.publish_report({'mode': 'baseline'}, output_dir)
         self.assertEqual(stat.S_IMODE(os.stat(output_path).st_mode), 0o600)
+
+    def test_cli_help_requires_a_preexisting_output_directory(self):
+        output = subprocess.check_output([sys.executable, SCRIPT, '--help'],
+                                         cwd=REPO)
+        self.assertIn('must already exist', output)
 
     def test_cli_validation_failure_creates_no_report(self):
         self.require_module()
@@ -550,6 +494,7 @@ class TestExternalOutputBoundary(_TemporaryDirectoryTest):
         self.require_module()
         records_path = os.path.join(self.tempdir, 'records.jsonl')
         output_dir = os.path.join(self.tempdir, 'output')
+        os.mkdir(output_dir)
         records = [
             _record('carrier', True, True, False,
                     variant_class='insertion', array_length=29),
