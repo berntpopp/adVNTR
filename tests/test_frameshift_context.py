@@ -5,6 +5,7 @@ from cStringIO import StringIO
 
 from advntr import settings
 from advntr.genome_analyzer import GenomeAnalyzer
+from advntr.mutation_keys import extract_raw_mutations
 from advntr.reference_vntr import ReferenceVNTR
 import advntr.vntr_finder as vntr_finder_module
 from advntr.vntr_finder import SelectedRead, VNTRFinder
@@ -27,13 +28,32 @@ class _CallingFinder(VNTRFinder):
         return 0.0, 1.0, 0.0
 
 
+class _PvalueRejectingFinder(_CallingFinder):
+    def identify_frameshift(self, *_args, **_kwargs):
+        return 1.0, 0.0, 1.0
+
+
 class _OutputFinder(object):
     last_frameshift_context = {
-        'I2_1_T_LEN2': '{"v":1,"contexts":[{"support":1}]}'
+        'I2_1_T_LEN2': '{"v":1,"contexts":[{"read_occurrence_support":1}]}'
     }
 
     def find_frameshift_from_alignment_file(self, _alignment_file, _unmapped):
         return [('I2_1_T_LEN2', 1, 2.5, 0.01)]
+
+
+class _AlignmentFinder(object):
+    """Keep the real candidate traversal while replacing only BAM read selection."""
+    def __init__(self, finder, selected_reads):
+        self.finder = finder
+        self.selected_reads = selected_reads
+
+    def find_frameshift_from_alignment_file(self, _alignment_file, _unmapped):
+        return self.finder.find_frameshift_from_selected_reads(self.selected_reads)
+
+    @property
+    def last_frameshift_context(self):
+        return self.finder.last_frameshift_context
 
 
 def _vpath(state_names):
@@ -69,6 +89,21 @@ def _insertion_read(inserted_sequence, query_name='read-1'):
 
 def _matching_read(query_name='match'):
     return _read_with_events({}, query_name)
+
+
+def _same_deletion_in_two_occurrences(query_name='two-occurrences'):
+    states = []
+    sequence = []
+    for _occurrence in range(2):
+        states.append('unit_start_1')
+        for position, base in enumerate(REFERENCE_UNIT, 1):
+            if position == 3:
+                states.append('D3_1')
+            else:
+                states.append('M%d_1' % position)
+                sequence.append(base)
+        states.append('unit_end_1')
+    return SelectedRead(''.join(sequence), -1.0, _vpath(states), query_name=query_name)
 
 
 class _StdoutScope(object):
@@ -111,8 +146,8 @@ class TestFrameshiftContext(unittest.TestCase):
         expected = (
             '{"v":1,"contexts":[{"events":[{"inserted_sequence":"TC",'
             '"normalized_offset":1,"normalized_sequence":"CT","raw_offset":2,'
-            '"type":"I"}],"observed_unit":"ACTCGTACGT","repeat_occurrence":0,'
-            '"support":1}]}'
+            '"type":"I"}],"observed_unit":"ACTCGTACGT","read_occurrence_support":1,'
+            '"repeat_occurrence":0}]}'
         )
         self.assertEqual(self.finder.last_frameshift_context['I2_1_T_LEN2'], expected)
         self.assertNotIn('\t', expected)
@@ -145,7 +180,7 @@ class TestFrameshiftContext(unittest.TestCase):
                          ['ACTCGTACGA', 'ACTCGTACGT'])
         self.assertEqual([context['events'][0]['normalized_sequence'] for context in contexts],
                          ['CT', 'CT'])
-        self.assertEqual([context['support'] for context in contexts], [1, 1])
+        self.assertEqual([context['read_occurrence_support'] for context in contexts], [1, 1])
 
     def test_same_query_name_mates_keep_distinct_immutable_evidence_by_read_ordinal(self):
         results = self.finder.find_frameshift_from_selected_reads([
@@ -158,10 +193,82 @@ class TestFrameshiftContext(unittest.TestCase):
         self.assertEqual([(item.selected_read_index, item.query_name, item.repeat_occurrence)
                           for item in evidence],
                          [(0, 'shared-name', 0), (1, 'shared-name', 0)])
-        self.assertEqual(json.loads(self.finder.last_frameshift_context[state])['contexts'][0]['support'], 2)
+        self.assertEqual(
+            json.loads(self.finder.last_frameshift_context[state])['contexts'][0]['read_occurrence_support'], 2
+        )
         self.assertNotIn('shared-name', self.finder.last_frameshift_context[state])
         with self.assertRaises(AttributeError):
             evidence[0].query_name = 'changed'
+
+    def test_random_match_states_advance_the_cursor_without_entering_the_observed_unit(self):
+        states = ['start_random_matches', 'unit_start_1', 'M1_1', 'I1_1',
+                  'M2_1', 'unit_end_1', 'end_random_matches', 'I0_prefix']
+
+        raw = extract_raw_mutations(states, 'XATCYZ', [REFERENCE_UNIT])
+
+        self.assertEqual(raw[3].legacy_key, 'I1_1_T')
+        self.assertEqual(raw[3].event.inserted_sequence, 'T')
+        self.assertEqual(raw[3].observed_unit, 'ATC')
+        self.assertEqual(raw[7].legacy_key, 'I0_prefix')
+        self.assertEqual(raw[7].event.inserted_sequence, 'Z')
+        self.assertEqual(raw[7].observed_unit, 'Z')
+
+    def test_separated_visits_to_one_insertion_state_remain_ordered_events(self):
+        states = ['unit_start_1', 'M1_1', 'I1_1', 'M2_1', 'I1_1']
+        states.extend(['M%d_1' % position for position in range(3, 9)])
+        states.append('unit_end_1')
+        read = SelectedRead('ATCGGTACGT', -1.0, _vpath(states), query_name='separated')
+
+        results = self.finder.find_frameshift_from_selected_reads([read])
+
+        self.assertEqual(results[0][:2], ('I1_1_T_LEN2', 1))
+        events = self.finder.last_frameshift_evidence['I1_1_T_LEN2'][0].events
+        self.assertEqual([event.inserted_sequence for event in events], ['T', 'G'])
+        self.assertEqual([event.raw_offset for event in events], [1, 1])
+
+    def test_one_read_supporting_the_same_state_twice_keeps_two_occurrence_records(self):
+        results = self.finder.find_frameshift_from_selected_reads([
+            _same_deletion_in_two_occurrences()
+        ])
+
+        self.assertEqual(results[0][:2], ('D3_1', 1))
+        evidence = self.finder.last_frameshift_evidence['D3_1']
+        self.assertEqual([(record.selected_read_index, record.query_name,
+                           record.repeat_occurrence) for record in evidence],
+                         [(0, 'two-occurrences', 0), (0, 'two-occurrences', 1)])
+        contexts = json.loads(self.finder.last_frameshift_context['D3_1'])['contexts']
+        self.assertEqual(sum(context['read_occurrence_support'] for context in contexts), 2)
+
+    def test_subthreshold_candidate_keeps_internal_evidence_but_emits_no_context_row(self):
+        settings.MIN_SUPPORTING_READ_COUNT = 2
+        alignment_finder = _AlignmentFinder(self.finder, [_insertion_read('TC', 'subthreshold')])
+        analyzer = GenomeAnalyzer([], [])
+        analyzer.ref_filename = 'reference.fa'
+        analyzer.target_vntr_ids = [25561]
+        analyzer.vntr_finder = {25561: alignment_finder}
+
+        with _StdoutScope() as output:
+            analyzer.find_frameshift_from_alignment_file('reads.bam')
+
+        self.assertEqual(output.getvalue().splitlines(), [
+            '#Input File: reads.bam',
+            '#Reference file: reference.fa',
+            '#P-value cutoff: 0.001',
+            '#VID\tState\tNumberOfSupportingReads\tMeanCoverage\tPvalue\tContext',
+        ])
+        evidence = self.finder.last_frameshift_evidence['I2_1_T_LEN2']
+        self.assertEqual([(record.selected_read_index, record.query_name,
+                           record.repeat_occurrence) for record in evidence],
+                         [(0, 'subthreshold', 0)])
+        self.assertEqual(self.finder.last_frameshift_context, {})
+
+    def test_pvalue_rejected_candidate_keeps_internal_support_evidence(self):
+        rejecting = _PvalueRejectingFinder(self.finder.reference_vntr)
+        rejecting.hmm = _FakeHMM()
+
+        self.assertIsNone(rejecting.find_frameshift_from_selected_reads([_insertion_read('TC')]))
+        self.assertEqual(len(rejecting.last_frameshift_evidence['I2_1_T_LEN2']), 1)
+        self.assertEqual(rejecting.last_frameshift_context, {})
 
     def test_context_and_evidence_reset_at_the_start_of_each_invocation(self):
         self.finder.find_frameshift_from_selected_reads([_insertion_read('TC')])
@@ -221,7 +328,8 @@ class TestFrameshiftContext(unittest.TestCase):
         self.assertEqual(lines[3], '#VID\tState\tNumberOfSupportingReads\tMeanCoverage\tPvalue\tContext')
         self.assertEqual(
             lines[4],
-            '25561\tI2_1_T_LEN2\t1\t2.5\t0.01\t{"v":1,"contexts":[{"support":1}]}'
+            '25561\tI2_1_T_LEN2\t1\t2.5\t0.01\t'
+            '{"v":1,"contexts":[{"read_occurrence_support":1}]}'
         )
         self.assertEqual(lines[4].split('\t')[:5],
                          ['25561', 'I2_1_T_LEN2', '1', '2.5', '0.01'])

@@ -220,13 +220,14 @@ def _event_dict(event):
 
 
 def encode_frameshift_context(evidence):
+    """Encode supporting read occurrences; their sum is not the legacy per-read count."""
     grouped = defaultdict(int)
     for record in evidence:
         grouped[(record.repeat_occurrence, record.observed_unit, record.events)] += 1
 
     encoded_contexts = []
     for (occurrence, observed_unit, events), support in grouped.items():
-        context = {'support': support, 'repeat_occurrence': occurrence,
+        context = {'read_occurrence_support': support, 'repeat_occurrence': occurrence,
                    'observed_unit': observed_unit,
                    'events': [_event_dict(event) for event in events]}
         encoded = json.dumps(context, sort_keys=True, separators=(',', ':'))

@@ -71,8 +71,8 @@ class VNTRFinder:
 
         self.is_frameshift_mode = is_frameshift_mode
         self.hmm = None
-        # Replaced at the start of every frameshift invocation and valid until the next.
-        # Evidence retains read identity for Task 7; emitted JSON deliberately does not.
+        # Replaced each invocation. Evidence retains support for every eligible candidate,
+        # excluding Task 7 opportunities; emitted Context stays called-only and anonymous.
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
 
@@ -350,7 +350,6 @@ class VNTRFinder:
         mutations = defaultdict(int)
         prefix_suffix_mutations = defaultdict(int)
         candidate_evidence = defaultdict(list)
-
         ru_bp_coverage = defaultdict(int)
         hmm_match_count = defaultdict(int)
         reference_repeat_order = []
@@ -564,6 +563,7 @@ class VNTRFinder:
                         selected_read_index, read.query_name, (state,), accepted_raw_mutations
                     ))
 
+        self.last_frameshift_evidence = dict((state, tuple(evidence)) for state, evidence in candidate_evidence.items())
         sorted_mutations = sorted(mutations.items(), key=lambda item: (item[1], item[0]))
         logging.debug('sorted mutations: %s ' % sorted_mutations)
 
@@ -692,10 +692,9 @@ class VNTRFinder:
                         frameshifts.append((candidate, mutation_count, avg_bp_coverage, pval))
 
         for state, _count, _coverage, _pval in frameshifts:
-            evidence = tuple(candidate_evidence[state])
+            evidence = self.last_frameshift_evidence[state]
             if not evidence:
                 raise AssertionError('called frameshift lacks context evidence: %s' % state)
-            self.last_frameshift_evidence[state] = evidence
             self.last_frameshift_context[state] = encode_frameshift_context(evidence)
         return frameshifts if len(frameshifts) > 0 else None
 
