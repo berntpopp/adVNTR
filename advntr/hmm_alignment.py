@@ -132,16 +132,17 @@ def get_modified_base_count_for_reference(detected_mutation):
 
 
 def _extend_mutation_sequence(mutation_sequence, addition):
-    """Join mutation tokens with '&', starting a new sequence when none is open.
+    """Join mutation tokens with '&' while preserving the old in-place semantics.
 
     `None` means no sequence is open yet, which is not the same as an empty one: only
-    `None` suppresses the separator. Both join sites in `generate_aln` route through
-    here so the two cannot drift apart again -- Case 3 previously lacked the guard Case
-    1 had, and raised TypeError after the genotype table was already written.
+    `None` suppresses the separator. The cross-HMM transition is responsible for opening
+    a new sequence before either join site; this fallback keeps malformed input from
+    raising, but it must not be used to recover a token the transition failed to open.
     """
     if mutation_sequence is None:
         return addition
-    return mutation_sequence + '&' + addition
+    mutation_sequence += '&' + addition
+    return mutation_sequence
 
 
 def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference_vntr_db=None, ref_vntr_dict=None):
@@ -354,6 +355,13 @@ def generate_aln(advntr_logfile, output_mutations=None, out_folder="", reference
                                     if mutation_sequence in target_mutations:
                                         vid_to_aln_info[vid][mutation_sequence].append(
                                             (sequence, visited_states, read_name))
+                                # A new HMM starts a new mutation sequence. Merely updating
+                                # prev_mutation loses this first token when the previous
+                                # sequence was closed by a D/I pair.
+                                mutation_sequence = temp_mutation
+                                if temp_mutation.startswith("I"):
+                                    mutation_sequence += "_LEN{}".format(
+                                        mutation_count_temp[temp_mutation])
                                 prev_mutation = temp_mutation
                                 continue
 
