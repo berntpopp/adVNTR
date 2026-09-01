@@ -154,27 +154,6 @@ cdef class Model(object):
     def add_transitions(self, transitions):
         pass
 
-    def log_probability(self, seq):
-        T = len(seq)
-        N = self.state_count() - 2 # exclude the first two states (model-start and model-end)
-        prob_mat = np.zeros((N,2))
-        for n in range(N):
-            state = self.states[n]
-            prob_mat[n,0] = self.transition_map[self.start][state] * state.distribution[seq[0]]
-        for t in range(1,T):
-            prob_mat[:,t%2] = 0.0
-            for n in range(N):
-                state = self.states[n]
-                for n_prev in range(N):
-                    state_prev = self.states[n_prev]
-                    prob_mat[n,t%2] += prob_mat[n_prev,(t-1)%2] * self.transition_map[state_prev][state]
-                prob_mat[n,t%2] *= state.distribution[seq[t]]
-        for n in range(N):
-            state = self.states[n]
-            prob_mat[n,(T-1)%2] *= self.transition_map[state][self.end]
-        prob = sum(prob_mat[:,(T-1)%2])
-        return np.log(prob)
-
     def bake(self, read_length=None, dp_score_threshold=None, merge=None, sort_by_name=False):
         """
         In a model, start state comes the first and end state comes the last.
