@@ -591,100 +591,6 @@ cdef class Model(object):
 
         return transition_probabilities
 
-    # @classmethod
-    # def from_matrix(cls, transition_probabilities, distributions, starts, ends=None,
-    #                 state_names=None, name=None, verbose=False, merge='All' ):
-    #     """Create a model from a more standard matrix format.
-    #
-    #     Take in a 2D matrix of floats of size n by n, which are the transition
-    #     probabilities to go from any state to any other state. May also take in
-    #     a list of length n representing the names of these nodes, and a model
-    #     name. Must provide the matrix, and a list of size n representing the
-    #     distribution you wish to use for that state, a list of size n indicating
-    #     the probability of starting in a state, and a list of size n indicating
-    #     the probability of ending in a state.
-    #
-    #     Parameters
-    #     ----------
-    #     transition_probabilities : array-like, shape (n_normal_states, n_normal_states)
-    #         The probabilities of each state transitioning to each other state.
-    #
-    #     distributions : array-like, shape (n_normal_states)
-    #         The distributions for each state. Silent states are indicated by
-    #         using None instead of a distribution object.
-    #
-    #     starts : array-like, shape (n_normal_states)
-    #         The probabilities of starting in each of the states.
-    #
-    #     ends : array-like, shape (n_normal_states), optional
-    #         If passed in, the probabilities of ending in each of the states.
-    #         If ends is None, then assumes the model has no explicit end
-    #         state. Default is None.
-    #
-    #     state_names : array-like, shape (n_normal_states), optional
-    #         The name of the states. If None is passed in, default names are
-    #         generated. Default is None
-    #
-    #     name : str, optional
-    #         The name of the model. Default is None
-    #
-    #     verbose : bool, optional
-    #         The verbose parameter for the underlying bake method. Default is False.
-    #
-    #     merge : 'None', 'Partial', 'All', optional
-    #         The merge parameter for the underlying bake method. Default is All
-    #
-    #     Returns
-    #     -------
-    #     model : Model
-    #         The baked model ready to go.
-    #
-    #     Examples
-    #     --------
-    #     matrix = [ [ 0.4, 0.5 ], [ 0.4, 0.5 ] ]
-    #     distributions = [NormalDistribution(1, .5), NormalDistribution(5, 2)]
-    #     starts = [ 1., 0. ]
-    #     ends = [ .1., .1 ]
-    #     state_names= [ "A", "B" ]
-    #
-    #     model = Model.from_matrix( matrix, distributions, starts, ends,
-    #         state_names, name="test_model" )
-    #     """
-    #
-    #     # Build the initial model
-    #     model = Model( name=name )
-    #     state_names = state_names or ["s{}".format(i) for i in range(len(distributions))]
-    #
-    #     # Build state objects for every state with the appropriate distribution
-    #     states = [ State( distribution, name=name ) for name, distribution in
-    #                zip( state_names, distributions) ]
-    #
-    #     n = len( states )
-    #
-    #     # Add all the states to the model
-    #     for state in states:
-    #         model.add_state( state )
-    #
-    #     # Connect the start of the model to the appropriate state
-    #     for i, prob in enumerate( starts ):
-    #         if prob != 0:
-    #             model.add_transition( model.start, states[i], prob )
-    #
-    #     # Connect all states to each other if they have a non-zero probability
-    #     for i in range( n ):
-    #         for j, prob in enumerate( transition_probabilities[i] ):
-    #             if prob != 0.:
-    #                 model.add_transition( states[i], states[j], prob )
-    #
-    #     if ends is not None:
-    #         # Connect states to the end of the model if a non-zero probability
-    #         for i, prob in enumerate( ends ):
-    #             if prob != 0:
-    #                 model.add_transition( states[j], model.end, prob )
-    #
-    #     model.bake()
-    #     return model
-
     def concatenate(self, other, suffix='', prefix='', transition_probability=1.0):
         """Concatenate this model to another model.
 
@@ -963,13 +869,6 @@ cdef class Model(object):
             row, col = vpath_table_row[row][col], vpath_table_col[row][col]
         vpath.insert(0, (self.state_to_index[self.states[row]], self.states[row]))
         return logp, vpath
-
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-
-
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
 
     def check_sanity_of_transition_prob(self, verbose):
         for subModel in self.subModels:
