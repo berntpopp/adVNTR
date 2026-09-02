@@ -16,7 +16,7 @@ HMM, no decoder, in the idiom of `tests/test_frameshift_opportunities.py:17-107`
    the third site's `ID:` prefix against the other two sites' `VID:`.
 
 2. **The exact caller is default-off and cannot run without a frozen background.** Every
-   probability in this file is synthetic (0.25, 0.125 -- powers of two, absurd for an
+   probability in this file is synthetic (0.125, 0.0625 -- powers of two, absurd for an
    indel background) and calibrated on nothing; PLAN Global Constraints forbid a
    cohort-derived number entering the tree in any form.
 """
@@ -42,20 +42,25 @@ from advntr.vntr_finder import SelectedRead, VNTRFinder
 UNITS = {'1': 'ACGTACGTACGT', '2': 'CCGTACGTACGT', '3': 'GCGTACGTACGT'}
 UNIT_LENGTH = 12
 
-#: `[1, 2, 2, 3]` makes `reference_repeat_order` `['L', '1', '2', '2', '3', 'R']`, so the
-#: suffix site reads `'1'` (one copy), the repeat site `'2'` (two copies) and the prefix
-#: site `'3'` (one copy): three distinct indices, three distinct denominators.
-SEGMENTS = [UNITS['1'], UNITS['2'], UNITS['2'], UNITS['3']]
+#: `[1, 2, 2, 2, 3]` makes `reference_repeat_order` `['L', '1', '2', '2', '2', '3', 'R']`,
+#: so the suffix site reads `'1'` (one copy), the repeat site `'2'` (THREE copies) and the
+#: prefix site `'3'` (one copy): three distinct indices, three distinct denominators. The
+#: three copies are load bearing -- with a 12 bp unit, `x / 12 / 2 / c` and
+#: `x / (12 * 2 * c)` are bit-identical for every `c` that is a power of two, so only an
+#: odd copy count can catch a re-associated division.
+SEGMENTS = [UNITS['1'], UNITS['2'], UNITS['2'], UNITS['2'], UNITS['3']]
 
-DRIVER_READS = 5
+#: Four drivers put 44 emitted bases behind the repeat index (4 occurrences x 11 after the
+#: deletion), and 44/12/2/3 is one of the operand sets where the two associations differ.
+DRIVER_READS = 4
 COVERAGE_ONLY_READS = 10
 
 SYNTHETIC_BACKGROUND = {
     'schema': 'advntr.frameshift.background',
     'version': 1,
     'provenance': 'SYNTHETIC FIXTURE -- calibrated on nothing, numbers are made up',
-    'default_probability': 0.25,
-    'states': {'D3_2': 0.125},
+    'default_probability': 0.125,
+    'states': {'D3_2': 0.0625},
 }
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,7 +130,7 @@ def _all_three_sites():
     """Reads that reach every decision site, plus reads that only add coverage.
 
     A flank indel is counted only when the same read also carries a repeat-unit mutation
-    (`advntr/vntr_finder.py:398-399` short-circuits first), so one read has to carry all
+    (`advntr/vntr_finder.py:402-403` short-circuits first), so one read has to carry all
     three. The coverage-only reads lift the suffix site's denominator above its support,
     which is what keeps that site off the `observed > coverage` short circuit.
     """
@@ -220,23 +225,23 @@ class _ExactCallerTestCase(unittest.TestCase):
 #: `advntr/vntr_finder.py:447` wrote it -- `x / (a * b * c)` is equal in exact arithmetic
 #: but not guaranteed bit-identical, and these strings would show the difference.
 EXPECTED_LOG = [
-    'Frameshift Candidate and Occurrence D3_2: 5',
-    'Observed repeating base pairs in RU: 55',
-    'Average coverage for each base pair in RU: 1.14583333333',
+    'Frameshift Candidate and Occurrence D3_2: 4',
+    'Observed repeating base pairs in RU: 44',
+    'Average coverage for each base pair in RU: 0.611111111111',
     'Sequencing error prob: 0',
     'Frame-shift prob: 1.0',
     'P-value: 0',
     'VID:1, There is a mutation at D3_2',
-    'Frameshift Candidate and Occurrence I12_suffix_LEN1: 5',
-    'Observed repeating base pairs in RU: 180',
-    'Average coverage for each base pair in RU: 7.5',
-    'Sequencing error prob: 3.431820847131946e-09',
-    'Frame-shift prob: 0.18953571659182317',
-    'P-value: 2.356642047510117e-09',
+    'Frameshift Candidate and Occurrence I12_suffix_LEN1: 4',
+    'Observed repeating base pairs in RU: 168',
+    'Average coverage for each base pair in RU: 7.0',
+    'Sequencing error prob: 3.396046500000007e-07',
+    'Frame-shift prob: 0.27062192218332315',
+    'P-value: 1.8566359291277707e-07',
     'VID:1, There is a mutation at I12_suffix_LEN1',
-    'Frameshift Candidate and Occurrence I0_prefix_LEN1: 5',
-    'Observed repeating base pairs in RU: 60',
-    'Average coverage for each base pair in RU: 2.5',
+    'Frameshift Candidate and Occurrence I0_prefix_LEN1: 4',
+    'Observed repeating base pairs in RU: 48',
+    'Average coverage for each base pair in RU: 2.0',
     'Sequencing error prob: 0',
     'Frame-shift prob: 1.0',
     'P-value: 0',
@@ -254,13 +259,13 @@ class TestTheThreeDecisionSites(_ExactCallerTestCase):
 
     def test_each_site_reads_its_own_repeat_unit_index(self):
         """Coverage is `total_bps / ru_length / ploidy / copies`, and the three indices
-        carry (55, 2), (180, 1) and (60, 1), so borrowing another site's index changes
+        carry (44, 3), (168, 1) and (48, 1), so borrowing another site's index changes
         the reported MeanCoverage."""
         results = self._by_state(self._run())
 
-        self.assertAlmostEqual(results['D3_2'][1], 55 / 12.0 / 2 / 2)
-        self.assertAlmostEqual(results['I12_suffix_LEN1'][1], 180 / 12.0 / 2 / 1)
-        self.assertAlmostEqual(results['I0_prefix_LEN1'][1], 60 / 12.0 / 2 / 1)
+        self.assertEqual(results['D3_2'][1], float(44) / 12 / 2 / 3)
+        self.assertEqual(results['I12_suffix_LEN1'][1], float(168) / 12 / 2 / 1)
+        self.assertEqual(results['I0_prefix_LEN1'][1], float(48) / 12 / 2 / 1)
 
     def test_the_third_site_still_logs_ID_where_the_others_log_VID(self):
         """`advntr/vntr_finder.py:551` against `:459` and `:519`. Almost certainly an
@@ -274,15 +279,22 @@ class TestTheThreeDecisionSites(_ExactCallerTestCase):
 
     def test_the_coverage_division_stays_left_associated(self):
         """`float(x) / a / b / c` is not guaranteed bit-identical to `x / (a * b * c)`.
-        These operands make the two forms differ, so the re-association is a real risk
-        and not a theoretical one."""
-        self.assertNotEqual(float(11) / 12 / 2 / 3, float(11) / (12 * 2 * 3))
+
+        The fixture is built so the repeat site lands on operands where the two forms
+        really do differ -- 44 emitted bases, a 12 bp unit, 3 copies -- because with a
+        power-of-two copy count every divisor is exact and the difference vanishes.
+        `'%s' % value` prints 12 significant digits, so `EXPECTED_LOG` shows
+        `0.611111111111` either way: only an exact comparison can catch this."""
+        results = self._by_state(self._run())
+
+        self.assertNotEqual(float(44) / 12 / 2 / 3, float(44) / (12 * 2 * 3))
+        self.assertEqual(results['D3_2'][1], float(44) / 12 / 2 / 3)
 
     def test_the_haploid_branch_drops_the_ploidy_divisor(self):
         self.finder.is_haploid = True
         results = self._by_state(self._run())
 
-        self.assertAlmostEqual(results['D3_2'][1], 55 / 12.0 / 2)
+        self.assertEqual(results['D3_2'][1], float(44) / 12 / 3)
 
     def test_a_candidate_below_the_support_floor_never_reaches_a_site(self):
         settings.MIN_SUPPORTING_READ_COUNT = DRIVER_READS + 1
@@ -383,13 +395,13 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
         self.assertEqual((records['D3_2']['support'],
                           records['D3_2']['opportunities']), (DRIVER_READS, DRIVER_READS))
         self.assertAlmostEqual(results['D3_2'][2],
-                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.125))
+                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.0625))
 
     def test_an_unlisted_state_scores_against_the_artifacts_default(self):
         results = self._by_state(self._run())
 
         self.assertAlmostEqual(results['I12_suffix_LEN1'][2],
-                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.25))
+                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.125))
 
     def test_the_state_column_and_the_coverage_column_are_untouched(self):
         """SPEC 3.5: `State` stays byte-identical and the table stays six columns. Only
@@ -397,7 +409,7 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
         results = self._by_state(self._run())
 
         self.assertEqual(sorted(results), ['D3_2', 'I0_prefix_LEN1', 'I12_suffix_LEN1'])
-        self.assertAlmostEqual(results['D3_2'][1], 55 / 12.0 / 2 / 2)
+        self.assertEqual(results['D3_2'][1], float(44) / 12 / 2 / 3)
 
     def test_the_run_log_records_which_artifact_scored_the_run(self):
         _results, messages = self._run_capturing_info()
