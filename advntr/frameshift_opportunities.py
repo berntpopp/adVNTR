@@ -13,7 +13,7 @@ The observation identity is `(selected_read_index, query_name, repeat_occurrence
 the first three fields of Task 5's `FrameshiftEvidence`
 (`advntr/mutation_keys.py:13-16`), reused rather than re-declared. Both `k` and `N`
 deduplicate on exactly that triple. `query_name` is `None` on the unmapped-recruited
-path (`advntr/vntr_finder.py:181` constructs a `SelectedRead` without one, so the
+path (`advntr/vntr_finder.py:182` constructs a `SelectedRead` without one, so the
 default at `:41` applies), so `selected_read_index` is the primary key and `query_name`
 is descriptive; nothing here groups by `query_name` alone.
 
@@ -36,21 +36,21 @@ Slot semantics, read off `get_repeat_matcher_enhanced_hmm`
   actually reached".
 - compound `A&B&...`: the SAME occurrence satisfies EVERY component, an intersection
   within one occurrence and never a union. The pattern index comes off field 1 of each
-  component exactly as `advntr/vntr_finder.py:432` reads it, and every component must
+  component exactly as `advntr/vntr_finder.py:474` reads it, and every component must
   match the occurrence's own submodel, so a candidate for pattern `p` can only ever draw
   on occurrences of `p`.
 
 **Eligibility is a counterfactual, not a transcription.** Every legacy filter runs only
 at an `I` or `D` state, because the read loop `continue`s otherwise
-(`advntr/vntr_finder.py:332-333`); a clean occurrence reaches none of them. The
+(`advntr/vntr_finder.py:336-337`); a clean occurrence reaches none of them. The
 predicate here therefore asks *"would this occurrence have been eligible had a candidate
 indel sat at this slot?"*.
 
-- Applied: `settings.USE_ONLY_FULLY_COVERED_RU` (`advntr/vntr_finder.py:337-338`), the
-  partial-occurrence `M >= 5` and `S < 4` tests (`:341-344`), the three read-level
-  rejections (`:362`, `:369`, `:375`) evaluated against the occurrence's own
-  `pattern_length`, and the 0.9 flank mutation/match ratio (`:410`, `:414`).
-- **Not** applied: the `I == D` balance tests (`:345` for partial occurrences, `:355`
+- Applied: `settings.USE_ONLY_FULLY_COVERED_RU` (`advntr/vntr_finder.py:341-342`), the
+  partial-occurrence `M >= 5` and `S < 4` tests (`:345-348`), the three read-level
+  rejections (`:366`, `:373`, `:379`) evaluated against the occurrence's own
+  `pattern_length`, and the 0.9 flank mutation/match ratio (`:414`, `:418`).
+- **Not** applied: the `I == D` balance tests (`:349` for partial occurrences, `:359`
   for complete ones). A clean occurrence has `I == D == 0`, so transcribing them
   literally would reject every clean occurrence and delete the entire zero-support
   inventory -- exactly the selection conditioning PLAN Task 7 forbids. The consequence is
@@ -67,7 +67,7 @@ out to the caller rather than left to be inferred:
   can sit at `support == 0` beside the occurrence-scoped rows that carry its support.
   Every row's `legacy_states` field names the shipped `State` strings its support belongs
   to -- see `per_occurrence_candidates`.
-- **Flank support can exceed the legacy count.** `advntr/vntr_finder.py:398-399`
+- **Flank support can exceed the legacy count.** `advntr/vntr_finder.py:402-403`
   short-circuits the whole prefix/suffix block for a read with no repeat-unit mutation,
   so the legacy never counts that read's flank indel; `observe_read` is called before
   that `continue` and `accepted_raw_mutations` already holds the flank raws. A flank row
@@ -123,7 +123,7 @@ def occurrence_spans(visited_states):
 
     This is the piece Task 5 deliberately did not build: nothing else in the tree
     enumerates an occurrence that produced no mutation, because
-    `advntr/vntr_finder.py:398-399` short-circuits on an empty mutation map before any
+    `advntr/vntr_finder.py:402-403` short-circuits on an empty mutation map before any
     evidence is recorded, so a clean read leaves no trace beyond `ru_bp_coverage`.
     """
     labels = occurrence_labels(visited_states)
@@ -188,7 +188,7 @@ def parse_components(candidate):
 
     `I2_1_T_LEN2` -> `('I', 2, '1')`, `D3_1` -> `('D', 3, '1')`,
     `I0_prefix_LEN1` -> `('I', 0, 'prefix')`. Field 1 is the pattern index, exactly as
-    `advntr/vntr_finder.py:432` takes it off a candidate.
+    `advntr/vntr_finder.py:474` takes it off a candidate.
     """
     components = []
     for component in candidate.split('&'):
@@ -200,19 +200,18 @@ def parse_components(candidate):
     return components
 
 
-#: Submodels whose ONLY route to their end terminator starts at the last reference
-#: position: the repeat submodel (`advntr/hmm_utils.py:670-680` -- `D_L`, `M_L`, `I_L`
-#: and nothing else) and the suffix matcher (`:465-472`, same shape). For those, seeing
-#: the end terminator identifies the last position without the counter knowing the
-#: model's length: a path is monotone forward, so the highest position it reached IS
-#: where it exited. The PREFIX matcher is deliberately absent -- `advntr/hmm_utils.py:416`
-#: gives EVERY match state a 0.01 transition to `prefix_end_prefix`, so a prefix span can
-#: carry the end terminator having exited one base in.
-_END_MARKS_LAST_POSITION = ('prefix',)
-
-
-def _end_marks_last_position(pattern_index):
-    return pattern_index not in _END_MARKS_LAST_POSITION
+#: Submodels whose end terminator does NOT identify the last reference position: the
+#: prefix matcher alone, because `advntr/hmm_utils.py:416` gives EVERY match state a 0.01
+#: transition to `prefix_end_prefix`, so a prefix span can carry the end terminator
+#: having exited one base in. The set is written negatively because its complement is
+#: open: repeat submodels are named by pattern index `'1'`, `'2'`, ... with no fixed
+#: upper bound, so no positive literal can enumerate them. Everything absent from here --
+#: the repeat submodels (`advntr/hmm_utils.py:670-680`: `D_L`, `M_L`, `I_L` and nothing
+#: else) and the suffix matcher (`:465-472`, same shape) -- reaches its end terminator
+#: only from the last position, so seeing that terminator identifies the position without
+#: the counter knowing the model's length: a path is monotone forward, so the highest
+#: position it reached IS where it exited.
+_END_DOES_NOT_MARK_LAST_POSITION = ('prefix',)
 
 
 def _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position, end_marks_last):
@@ -229,17 +228,21 @@ def _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position, end
     terminator, so an end terminator can never be evidence that slot 0 was crossed.
 
     `after` at `position >= 1` is the end terminator only when it pins the last reference
-    position (see `_END_MARKS_LAST_POSITION`). Without that gate a read exiting
+    position (see `_END_DOES_NOT_MARK_LAST_POSITION`). Without that gate a read exiting
     `M1_prefix -> prefix_end_prefix` -- its last emitted base sitting AT the slot -- would
     be credited for `I1_prefix`, which is precisely the read-end inflation this module
     rejects, and it is asymmetric between prefix and suffix reads.
 
     The cost of excluding the prefix matcher is exactly one slot: `I{L}_prefix` is not
     credited to a prefix span that ran to `prefix_end_prefix` without visiting `I{L}`.
-    Under-counting one boundary slot is the conservative side of a denominator, the flank
-    length is not reachable from here without new arguments the LOC ratchet has no room
-    for, and no such candidate is callable anyway -- `advntr/vntr_finder.py:523` gates
-    prefix candidates on a small leading-nucleotide-run boundary.
+    That is conservative about what the counter CLAIMS -- it never asserts an opportunity
+    the decoder did not demonstrate -- and it is emphatically not conservative about
+    calling: in the exact binomial a smaller `N` at the same `k` LOWERS the p-value, so
+    under-counting a denominator pushes toward a call, not away from one. The
+    load-bearing half of the argument is therefore the other one: no candidate at that
+    slot is callable at all, because `advntr/vntr_finder.py:524` gates prefix candidates
+    on a small leading-nucleotide-run boundary. (The flank length is also not reachable
+    from here without new arguments the LOC ratchet has no room for.)
     """
     if (inserted >> position) & 1:
         return True
@@ -264,8 +267,9 @@ def _signature_supports(signature, components):
         if kind == 'D':
             if not (reached >> position) & 1:
                 return False
-        elif not _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position,
-                                         _end_marks_last_position(pattern_index)):
+        elif not _insertion_slot_crossed(
+                reached, inserted, saw_start, saw_end, position,
+                pattern_index not in _END_DOES_NOT_MARK_LAST_POSITION):
             return False
     return True
 
@@ -275,7 +279,7 @@ def occurrence_counts(ru_state_count, occurrence):
 
     `ru_state_count` is a `defaultdict(lambda: defaultdict(int))`
     (`advntr/hmm_utils.py:158`), so a missing occurrence silently reads as all-zero and
-    the legacy `M >= 5` test at `advntr/vntr_finder.py:341` then skips with no
+    the legacy `M >= 5` test at `advntr/vntr_finder.py:345` then skips with no
     diagnostic. Membership is checked first so the denominator does not inherit that
     silence -- and so reading the counts cannot insert an entry into the caller's dict.
     """
@@ -286,7 +290,7 @@ def occurrence_counts(ru_state_count, occurrence):
 
 
 def flank_ratio_gates(visited_states):
-    """Mirror the flank mutation/match ratio filter at `advntr/vntr_finder.py:410`, `:414`.
+    """Mirror the flank mutation/match ratio filter at `advntr/vntr_finder.py:414`, `:418`.
 
     Note the direction: a flank candidate is KEPT only when its mutations are at least
     0.9x its matches, and the test is skipped entirely when the flank has no match state.
@@ -345,7 +349,7 @@ def _visit_count(raw_mutation):
 
     `extract_raw_mutations` collapses an insertion run to its first index
     (`advntr/mutation_keys.py:138-158`), so the run length is the visit count
-    `mutation_count_temp` would have accumulated at `advntr/vntr_finder.py:349`/`:385`.
+    `mutation_count_temp` would have accumulated at `advntr/vntr_finder.py:353`/`:389`.
     """
     if raw_mutation.event.type == 'I':
         return len(raw_mutation.event.inserted_sequence)
@@ -353,7 +357,7 @@ def _visit_count(raw_mutation):
 
 
 def _flank_candidates(counts):
-    """Mirror the flank candidate names built at `advntr/vntr_finder.py:418`."""
+    """Mirror the flank candidate names built at `advntr/vntr_finder.py:422`."""
     return [(state + ('_LEN%d' % count if state.startswith('I') else ''), (state,))
             for state, count in counts.items()]
 
@@ -392,7 +396,7 @@ def per_occurrence_candidates(accepted_raw_mutations):
     `legacy_states` names the shipped `State` strings its support belongs to; the
     whole-read reconstruction that produces them is run here on the same
     `accepted_raw_mutations`, minus the flank raws that `mutation_count_temp` never sees
-    (`advntr/vntr_finder.py:316` diverts them).
+    (`advntr/vntr_finder.py:320` diverts them).
 
     Returns `occurrence -> [(candidate, contributing raw mutations, legacy State names)]`.
     """
@@ -423,7 +427,7 @@ def per_occurrence_candidates(accepted_raw_mutations):
                          if raw.legacy_key in legacy_keys)
             if occurrence in FLANK_OCCURRENCES:
                 # One flank pseudo-occurrence per read per flank, and no fusion at
-                # `advntr/vntr_finder.py:418`, so the two names always agree.
+                # `advntr/vntr_finder.py:422`, so the two names always agree.
                 states = (candidate,)
             else:
                 states = tuple(sorted(set(legacy_state_of_key[key] for key in legacy_keys
@@ -500,11 +504,11 @@ class OpportunityCounter(object):
 
         `round(ru_bp_coverage / ru_length)` is carried to QUANTIFY the unit mismatch that
         PLAN Task 7 Step 3 asks about, never as a definition of `N`. `hmm_match_count` is
-        a `defaultdict(int)` (`advntr/vntr_finder.py:210`), so `ru_length` can be `0` and
-        `advntr/vntr_finder.py:444`'s division is a live `ZeroDivisionError`; the ratio
+        a `defaultdict(int)` (`advntr/vntr_finder.py:214`), so `ru_length` can be `0` and
+        `advntr/vntr_finder.py:451`'s division is a live `ZeroDivisionError`; the ratio
         is guarded here and reported as `None` instead. Flank candidates report `None`
         too: the legacy flank denominator borrows a repeat-unit index from
-        `reference_repeat_order` (`advntr/vntr_finder.py:493`, `:524`), and rebuilding
+        `reference_repeat_order` (`advntr/vntr_finder.py:515`, `:525`), and rebuilding
         that is Task 8's business, not a shadow counter's.
         """
         pattern_index = components[0][2] if components else None
@@ -516,7 +520,7 @@ class OpportunityCounter(object):
         if ru_length and total_bps is not None:
             ratio = int(round(total_bps / float(ru_length)))
             if copies:
-                # Left-to-right exactly as `advntr/vntr_finder.py:444`/`:447` associate
+                # Left-to-right exactly as `advntr/vntr_finder.py:451`/`:454` associate
                 # it. `x / (a * b * c)` is equal in exact arithmetic but can differ in
                 # the last ulp, and this field exists only to sit beside the printed
                 # MeanCoverage. Dividing by 1 is exact, so the haploid branch, which has
@@ -536,7 +540,7 @@ def encode_opportunity_diagnostics(records, version=DIAGNOSTICS_VERSION):
 
     Same idiom as `advntr/mutation_keys.encode_frameshift_context` (`:237-251`). Sorting
     the ENCODED strings is the load-bearing step, not decoration: `mutations` and
-    `candidate_evidence` are plain `defaultdict`s (`advntr/vntr_finder.py:209-211`) whose
+    `candidate_evidence` are plain `defaultdict`s (`advntr/vntr_finder.py:213-215`) whose
     Python 2 iteration order is hash order, and a single-threaded unit test would not
     catch the difference. No `query_name` appears in any field, mirroring the anonymity
     property `tests/test_frameshift_context.py:199` pins for Task 5's Context column.
