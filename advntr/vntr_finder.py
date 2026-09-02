@@ -19,6 +19,7 @@ from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
 from advntr.sam_utils import get_reference_genome_of_alignment_file, get_related_reads_and_read_count_in_samfile
 from advntr import read_selection
+from advntr import repeat_order
 from advntr import settings
 from advntr.utils import is_low_quality_read
 
@@ -199,150 +200,8 @@ class VNTRFinder:
         return sequencing_error_prob, frameshift_prob, pval
 
     @staticmethod
-    def get_reference_repeat_order(patterns, unique_repeat_units):
-        reference_repeat_order = ['L']
-        for repeat_unit in patterns:
-            for i, unique_repeat_unit in enumerate(unique_repeat_units):
-                if repeat_unit == unique_repeat_unit:
-                    reference_repeat_order.append(str(i+1))
-        reference_repeat_order.append('R')
-
-        return reference_repeat_order
-
-    @staticmethod
     def get_repeat_unit_number(read):
-        sequence = read.sequence
-        visited_states = [state.name for idx, state in read.vpath[1:-1]]
-
-        read_as_repeat_unit_number = []
-        annotated_read = defaultdict(str)
-        unit_start_points = []
-
-        current_state = None
-        visited_repeat_index = -1
-        sequence_index = 0
-        for si, state in enumerate(visited_states):
-            if 'suffix' in state:
-                if current_state != 'L':
-                    read_as_repeat_unit_number.append('L')
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = 'L'
-            elif 'unit_end' in state:
-                if current_state is None:
-                    repeat_unit_number = state.split("_")[-1]
-                    read_as_repeat_unit_number.append(repeat_unit_number)
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = repeat_unit_number
-            elif 'unit_start' in state:
-                repeat_unit_number = state.split("_")[-1]
-                read_as_repeat_unit_number.append(repeat_unit_number)
-                unit_start_points.append(si)
-                visited_repeat_index += 1
-                current_state = repeat_unit_number
-            elif 'prefix' in state:
-                if current_state != 'R':
-                    read_as_repeat_unit_number.append('R')
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = 'R'
-            else:
-                # Starting with match states (e.g. M2_1, M3_1)
-                # Same as unit_end
-                if current_state is None:
-                    repeat_unit_number = state.split("_")[-1]
-                    read_as_repeat_unit_number.append(repeat_unit_number)
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = repeat_unit_number
-
-            if state.startswith('M') or state.startswith('I'):
-                annotated_read[visited_repeat_index] += sequence[sequence_index]
-                sequence_index += 1
-
-        assert len(sequence) == sequence_index
-        return read_as_repeat_unit_number, annotated_read, unit_start_points
-
-    @staticmethod
-    def find_mutated_repeat_unit(read, reference):
-        """
-        read, reference
-        :param read_as_repeat_unit_number: string1
-        :param reference_repeat_order: string2
-        :return: the mutated repeat unit number based on local alignment
-        """
-        n = len(read)
-        m = len(reference)
-        dynamic_table = [[0] * (m + 1) for _ in range(n + 1)]
-        backtrack = [[0] * (m + 1) for _ in range(n + 1)]
-
-        # Initialize the first row and column
-        for i in range(1, n + 1):
-            dynamic_table[i][0] = 0
-
-        for j in range(1, m + 1):
-            dynamic_table[0][j] = 0
-
-        max_value = 0
-        max_cell = [0, 0]
-        for i in range(1, n + 1):
-            for j in range(1, m + 1):
-                match_score = 1 if read[i-1] == reference[j-1] else 0
-                dynamic_table[i][j] = dynamic_table[i - 1][j - 1] + match_score
-
-                if dynamic_table[i][j] >= max_value:
-                    max_value = dynamic_table[i][j]
-                    max_cell[0] = i
-                    max_cell[1] = j
-
-                if dynamic_table[i][j] == 0:
-                    backtrack[i][j] = "source"
-                else:
-                    backtrack[i][j] = "diagonal"
-
-        alignment = [[], []]
-        x = max_cell[0]
-        y = max_cell[1]
-
-        mutated_repeat_indices = []
-        mutated_repeats = []
-        correct_repeats = []
-
-        prev_score = len(read) + 1  # max + 1 (impossible to achieve this value)
-        while x != 0 and y != 0:
-            current_score = dynamic_table[x][y]
-            if prev_score == current_score:  # meaning the previous match was wrong
-                mutated_repeat_indices.append(x)
-                mutated_repeats.append(read[x])
-                correct_repeats.append(reference[y])
-            prev_score = current_score
-
-            if backtrack[x][y] == "diagonal":
-                alignment[0].insert(0, read[x - 1])
-                alignment[1].insert(0, reference[y - 1])
-                x = x - 1
-                y = y - 1
-            else:
-                x = 0
-                y = 0
-
-        match_count = dynamic_table[max_cell[0]][max_cell[1]]
-
-        if match_count == len(reference):
-            return [], [], []
-        else:
-            return mutated_repeat_indices, mutated_repeats, correct_repeats
-
-    @staticmethod
-    def get_valid_repeat_orders(repeat_orders):
-        min_observed_repeat = 2
-        valid_repeat_orders = set()
-        for size in range(min_observed_repeat, len(repeat_orders)):
-            for i in range(len(repeat_orders) - size + 1):
-                valid_repeat_orders.add(''.join(repeat_orders[i:i+size]))
-
-        return valid_repeat_orders
+        return repeat_order.get_repeat_unit_number(read)
 
     def find_frameshift_from_selected_reads(self, selected_reads):
         self.last_frameshift_context = {}
@@ -357,7 +216,7 @@ class VNTRFinder:
             patterns = self.reference_vntr.get_repeat_segments()
             sorted_unique_patterns = sorted(list(set(patterns)))
             pattern_clusters = [[pattern] * patterns.count(pattern) for pattern in sorted_unique_patterns]
-            reference_repeat_order = self.get_reference_repeat_order(patterns, sorted_unique_patterns)
+            reference_repeat_order = repeat_order.get_reference_repeat_order(patterns, sorted_unique_patterns)
         else:
             pattern_clusters = get_pattern_clusters(self.reference_vntr.get_repeat_segments())
         estimated_ru_count = defaultdict(int)
@@ -367,7 +226,7 @@ class VNTRFinder:
         if self.is_frameshift_mode:
             # Build reference repeat order table once for a quick lookup
             repeat_unit_length = len(self.reference_vntr.pattern)
-            valid_repeat_orders_in_reference = self.get_valid_repeat_orders(reference_repeat_order)
+            valid_repeat_orders_in_reference = repeat_order.get_valid_repeat_orders(reference_repeat_order)
             max_covered_repeat_ratio = float(self.hmm.read_length_used_to_build_model) / repeat_unit_length
             if settings.USE_REF_ALIGNMENT and max_covered_repeat_ratio < 3:
                 logging.info('repeat-unit realignment is inactive: read length %s covers %.2f repeat units of '
@@ -389,7 +248,7 @@ class VNTRFinder:
                 else:
                     if ''.join(read_as_repeat_unit_number) not in valid_repeat_orders_in_reference \
                             and len(read_as_repeat_unit_number) >= 3 and max_covered_repeat >= 3:
-                        mutated_repeat_indices, mutated_repeats, correct_repeats = self.find_mutated_repeat_unit(
+                        mutated_repeat_indices, mutated_repeats, correct_repeats = repeat_order.find_mutated_repeat_unit(
                             read_as_repeat_unit_number, reference_repeat_order)
                         # TODO: Multiple not-aligned repeats?
                         # Multiple mutated cases are usually the first or last RU is wrong
