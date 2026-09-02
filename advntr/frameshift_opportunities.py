@@ -90,19 +90,6 @@ PARTIAL_OCCURRENCES = ('partial_start', 'partial_end')
 OccurrenceSpan = namedtuple('OccurrenceSpan', 'occurrence signature patterns')
 
 
-def _terminator_names(pattern_index):
-    """The `unit_start`/`unit_end` pair of one submodel.
-
-    The flank matchers use their own names for the same two silent states:
-    `suffix_start_suffix`/`suffix_end_suffix` (`advntr/hmm_utils.py:445-446`) and
-    `prefix_start_prefix`/`prefix_end_prefix` (`:378-379`).
-    """
-    if pattern_index in ('suffix', 'prefix'):
-        return '%s_start_%s' % (pattern_index, pattern_index), '%s_end_%s' % (
-            pattern_index, pattern_index)
-    return 'unit_start_%s' % pattern_index, 'unit_end_%s' % pattern_index
-
-
 def _position_of(state):
     """(kind, position) for an `M`/`I`/`D` state, else `(None, None)`.
 
@@ -125,11 +112,11 @@ def occurrence_spans(visited_states):
     evidence is recorded, so a clean read leaves no trace beyond `ru_bp_coverage`.
     """
     labels = occurrence_labels(visited_states)
+    patterns = {}
     reached = defaultdict(int)
     inserted = defaultdict(int)
     saw_start = defaultdict(bool)
     saw_end = defaultdict(bool)
-    patterns = defaultdict(set)
     order = []
     for index, state in enumerate(visited_states):
         occurrence = labels[index]
@@ -165,6 +152,9 @@ def occurrence_spans(visited_states):
 
 
 def _is_start_terminator(state):
+    """The flank matchers name the same two silent states their own way:
+    `suffix_start_suffix`/`suffix_end_suffix` (`advntr/hmm_utils.py:445-446`) and
+    `prefix_start_prefix`/`prefix_end_prefix` (`:378-379`)."""
     return (state.startswith('unit_start') or state.startswith('suffix_start')
             or state.startswith('prefix_start'))
 
