@@ -73,6 +73,12 @@ def genotype(args, genotype_parser):
         print_error(genotype_parser, 'threads cannot be less than 1')
     settings.CORES = args.threads
     settings.PRUNE_REVERSE_DECODE = args.prune_reverse
+    settings.EXACT_FRAMESHIFT_CALLER = args.exact_frameshift_caller
+    settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
+    if args.exact_frameshift_caller and args.frameshift_background is None:
+        print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '
+                                     'background model: pass --frameshift-background '
+                                     '<file>. There is deliberately no built-in default.')
 
     if args.expansion and args.coverage is None:
         print_error(genotype_parser, 'Please specify the average coverage to identify the expansion')

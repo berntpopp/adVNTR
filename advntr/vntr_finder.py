@@ -11,6 +11,7 @@ from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
+from advntr import exact_caller
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
@@ -200,6 +201,9 @@ class VNTRFinder:
         return repeat_order.get_repeat_unit_number(read)
 
     def find_frameshift_from_selected_reads(self, selected_reads):
+        # First, so a run configured for the default-off exact caller without a frozen
+        # background fails before any read is processed rather than after all of them.
+        background = exact_caller.configured_background()
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
         self.last_frameshift_opportunities = {}
@@ -427,6 +431,44 @@ class VNTRFinder:
         logging.debug('sorted mutations: %s ' % sorted_mutations)
 
         frameshifts = []
+
+        def decide_and_record(candidate, count, repeat_unit_index, log_id):
+            """The three decision sites' shared body: coverage, then the p-value, then the call.
+
+            The three differ only in which repeat-unit index they read, which count they
+            pass, and one log prefix -- `log_id` is `'VID'` at the first two sites and
+            `'ID'` at the third, preserved exactly as the third site wrote it. Note the
+            division is left-associated on purpose: `float(x) / a / b / c` is not
+            guaranteed bit-identical to `x / (a * b * c)`, and MeanCoverage is printed.
+
+            `background` is `None` unless Task 8's default-off `--exact-frameshift-caller`
+            is on, so with the flag off this is byte-for-byte the pre-Task-8 decision.
+            """
+            ru_length = hmm_match_count[repeat_unit_index]
+            total_bps_in_ru = ru_bp_coverage[repeat_unit_index]
+            logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
+            if self.is_haploid:
+                avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[repeat_unit_index]
+                expected_indel_transitions = 0.99 / estimated_ru_count[repeat_unit_index]
+            else:
+                avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[repeat_unit_index]
+                expected_indel_transitions = 0.99 / (2 * estimated_ru_count[repeat_unit_index])
+            logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
+            if background is None:
+                seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
+                    avg_bp_coverage, count, expected_indel_transitions
+                )
+                logging.info('Sequencing error prob: %s' % seq_err_prob)
+                logging.info('Frame-shift prob: %s' % frameshift_prob)
+                is_mutation = pval < settings.INDEL_MUTATION_MIN_PVALUE
+            else:
+                is_mutation, pval = exact_caller.decide(self.last_frameshift_opportunities, candidate,
+                                                        background, settings.INDEL_MUTATION_MIN_PVALUE)
+            logging.info('P-value: %s' % pval)
+            if is_mutation:
+                logging.info(log_id + ':{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
+                frameshifts.append((candidate, count, avg_bp_coverage, pval))
+
         for frameshift_candidate in sorted_mutations:
             state = frameshift_candidate[0]
             pattern_index = state.split("_")[1] if "&" not in state else state.split("&")[0].split("_")[1]
@@ -436,27 +478,7 @@ class VNTRFinder:
                 logging.info('Skipped due to too small number of occurrence {}: {}'.format(state,
                                                                                           observed_mutation_count))
                 continue
-            ru_length = hmm_match_count[pattern_index]
-            total_bps_in_ru = ru_bp_coverage[pattern_index]
-            logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-
-            if self.is_haploid:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[pattern_index]
-                expected_indel_transitions = 0.99 / estimated_ru_count[pattern_index]
-            else:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[pattern_index]
-                expected_indel_transitions = 0.99 / (2 * estimated_ru_count[pattern_index])
-
-            logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-            seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                avg_bp_coverage, observed_mutation_count, expected_indel_transitions
-            )
-            logging.info('Sequencing error prob: %s' % seq_err_prob)
-            logging.info('Frame-shift prob: %s' % frameshift_prob)
-            logging.info('P-value: %s' % pval)
-            if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                logging.info('VID:{}, There is a mutation at {}'.format(self.reference_vntr.id, state))
-                frameshifts.append((state, observed_mutation_count, avg_bp_coverage, pval))
+            decide_and_record(state, observed_mutation_count, pattern_index, 'VID')
 
         # Check prefix/suffix boundary conditions
         repeat_segments = self.reference_vntr.get_repeat_segments()
@@ -496,28 +518,7 @@ class VNTRFinder:
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue
-                    ru_length = hmm_match_count[first_repeat_unit_index]
-                    total_bps_in_ru = ru_bp_coverage[first_repeat_unit_index]
-                    logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-                    if self.is_haploid:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[
-                            first_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / estimated_ru_count[first_repeat_unit_index]
-                    else:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / \
-                                          estimated_ru_count[first_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / (2 * estimated_ru_count[first_repeat_unit_index])
-                    logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-
-                    seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                        avg_bp_coverage, mutation_count, expected_indel_transitions
-                    )
-                    logging.info('Sequencing error prob: %s' % seq_err_prob)
-                    logging.info('Frame-shift prob: %s' % frameshift_prob)
-                    logging.info('P-value: %s' % pval)
-                    if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                        logging.info('VID:{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
-                        frameshifts.append((candidate, mutation_count, avg_bp_coverage, pval))
+                    decide_and_record(candidate, mutation_count, first_repeat_unit_index, 'VID')
 
             if 'prefix' in candidate:
                 if mutation_position <= prefix_mutation_check_boundary:  # e.g. I0 is always ok
@@ -527,28 +528,7 @@ class VNTRFinder:
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue
-                    ru_length = hmm_match_count[last_repeat_unit_index]
-                    total_bps_in_ru = ru_bp_coverage[last_repeat_unit_index]
-                    logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-                    if self.is_haploid:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[
-                            last_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / estimated_ru_count[last_repeat_unit_index]
-                    else:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / \
-                                          estimated_ru_count[last_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / (2 * estimated_ru_count[last_repeat_unit_index])
-                    logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-
-                    seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                        avg_bp_coverage, mutation_count, expected_indel_transitions
-                    )
-                    logging.info('Sequencing error prob: %s' % seq_err_prob)
-                    logging.info('Frame-shift prob: %s' % frameshift_prob)
-                    logging.info('P-value: %s' % pval)
-                    if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                        logging.info('ID:{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
-                        frameshifts.append((candidate, mutation_count, avg_bp_coverage, pval))
+                    decide_and_record(candidate, mutation_count, last_repeat_unit_index, 'ID')
 
         for state, _count, _coverage, _pval in frameshifts:
             evidence = self.last_frameshift_evidence[state]

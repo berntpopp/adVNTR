@@ -94,6 +94,16 @@ def main():
                                        help='prune the reverse-complement decode against the '
                                             'forward score (default-off; produces identical '
                                             'genotype calls -- see AGENTS.md Tier B)')
+    genotype_others_group.add_argument('--exact-frameshift-caller', action='store_true', default=False,
+                                       help='decide frameshifts with a one-sided exact '
+                                            'binomial over the candidate opportunity '
+                                            'count instead of the shipped statistic '
+                                            '(default-off; requires '
+                                            '--frameshift-background)')
+    genotype_others_group.add_argument('--frameshift-background', type=str, metavar='<file>', default=None,
+                                       help='frozen background model for '
+                                            '--exact-frameshift-caller; there is no '
+                                            'built-in default')
     genotype_others_group.add_argument('-u', '--update', action='store_true', default=False,
                                        help='set this flag to iteratively update the model')
     genotype_others_group.add_argument('-vid', '--vntr_id', type=str, metavar='<text>', default=None,

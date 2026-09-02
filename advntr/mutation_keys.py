@@ -62,7 +62,7 @@ def occurrence_labels(visited_states):
 
     Extracted so `advntr/frameshift_opportunities.py` reads occurrences off exactly this
     function rather than inventing a fourth numbering beside it,
-    `advntr/vntr_finder.py:310-312`'s `current_repeat` and
+    `advntr/vntr_finder.py:314-316`'s `current_repeat` and
     `advntr/hmm_utils.py:160`'s `complete_ru_index`. Like `current_repeat` it counts
     `unit_start` visits from 0; the string buckets are what `ru_state_count` keys the
     partial and flank cases on.

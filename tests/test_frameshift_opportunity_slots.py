@@ -93,7 +93,7 @@ class TestOpportunityPredicates(unittest.TestCase):
 
     def test_a_balanced_insertion_deletion_pair_is_an_opportunity_without_support(self):
         """The deliberate divergence: the legacy `I == D` tests
-        (`advntr/vntr_finder.py:345`, `:355`) are support-side, not eligibility."""
+        (`advntr/vntr_finder.py:349`, `:359`) are support-side, not eligibility."""
         counts = {0: {'M': 12, 'I': 1, 'D': 1, 'S': 0}}
         span = self._spans(['unit_start_1', 'M1_1', 'unit_end_1'])[0]
 

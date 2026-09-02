@@ -7,7 +7,7 @@ imported so neither module constrains the other's fixtures.
 
 The reference unit is 12 bp, not that file's 8 bp, so that a 6 bp insertion and a 3 bp
 deletion run both still clear the legacy read-level rejections at
-`advntr/vntr_finder.py:362` and `:369` (`> pattern_length / 2`). At 8 bp those cap the
+`advntr/vntr_finder.py:366` and `:373` (`> pattern_length / 2`). At 8 bp those cap the
 insertion at 4 bases, which is too little room to drive `N` and
 `round(ru_bp_coverage / ru_length)` apart in a legible fixture.
 """
@@ -212,7 +212,7 @@ class TestFrameshiftOpportunities(unittest.TestCase):
 
     def test_read_spanning_a_callable_state_without_an_indel_is_an_opportunity(self):
         """The zero-support inventory: a clean read leaves no trace today, because
-        `advntr/vntr_finder.py:398-399` short-circuits before any evidence is recorded."""
+        `advntr/vntr_finder.py:402-403` short-circuits before any evidence is recorded."""
         records = self._run([_deletion_read(3), _clean_read(), _clean_read('clean-2')])
 
         self.assertEqual(self._pair(records, 'D3_1'), (1, 3))
@@ -339,7 +339,7 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         """PLAN Task 7 Step 3: quantify the unit mismatch, do not hide it.
 
         A fully deleted occurrence cannot appear here: `abs(M + I - pattern_length) >
-        pattern_length / 2` (`advntr/vntr_finder.py:362`) rejects the read outright, so
+        pattern_length / 2` (`advntr/vntr_finder.py:366`) rejects the read outright, so
         a 3 bp deletion run is the strongest admissible deletion-heavy occurrence.
         """
         reads = [
@@ -430,7 +430,7 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(records['D12_2']['legacy_states'], ['D11_2&D12_2'])
 
     def test_flank_support_survives_the_short_circuit_that_drops_the_legacy_count(self):
-        """`advntr/vntr_finder.py:398-399` skips the whole prefix/suffix block for a read
+        """`advntr/vntr_finder.py:402-403` skips the whole prefix/suffix block for a read
         with no repeat-unit mutation, so the legacy never counts this flank insertion;
         `observe_read` runs before that `continue`."""
         read = _flank_read([], ['M1_prefix', 'I1_prefix', 'I1_prefix'], 'AAA', 'flank-only')

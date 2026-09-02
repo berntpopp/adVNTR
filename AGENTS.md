@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1232 |
+| `advntr/vntr_finder.py` | 1212 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -183,6 +183,30 @@ way can only prune paths that could never have won.
   speedup matters. Turning it on by default is a separate decision that has not been
   taken -- it stays opt-in.
 
+### `--exact-frameshift-caller`: a Tier B flag that cannot run unconfigured
+
+The second Tier B flag (Task 8; `advntr/settings.py` `EXACT_FRAMESHIFT_CALLER`, default
+`False`, written from `args.exact_frameshift_caller` at `advntr/advntr_commands.py:76`).
+With it off, the decision is the shipped `identify_frameshift`
+(`advntr/vntr_finder.py:187-197`) and the path is byte-for-byte the pre-Task-8 one. With
+it on, `advntr/exact_caller.py` decides with a one-sided exact binomial
+(`advntr/exact_tail.py`) over Task 7's integer `(k, N)` and a frozen background loaded
+from `--frameshift-background <file>`.
+
+- **It is not usable without an artifact, by design.** There is no built-in `p0` and
+  there must not be one: SPEC Q-RATE shows the public candidate-conditioned rates
+  (~1e-3, 1.7e-4) are conditional on candidates already selected at support >= 3 and are
+  not plug-in estimates for a production null. `--exact-frameshift-caller` with no
+  `--frameshift-background` is a startup error, and enabling it through `settings`
+  raises before any read is processed. Falling back to the shipped statistic would make
+  the flag a lie.
+- **`State` and the six-column table are untouched.** Only the p-value moves;
+  `MeanCoverage` stays the legacy quantity, so a flag-on run stays diffable against a
+  flag-off one.
+- **Not yet calibrated or measured.** The background must be frozen on a partition that
+  is not the holdout, and the operating point measured once afterwards. Until that is
+  done the flag is a mechanism, not a recommendation.
+
 ## Git and PRs
 
 - Conventional commits (`feat:`, `fix:`, `perf:`, `test:`, `build:`, `docs:`, `refactor:`).
@@ -220,12 +244,12 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **`wraparound=False` segfaults.** The code relies on negative indexing and `boundscheck`
   is already off. Verified empirically, not theorised.
 
-- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:903`
+- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:883`
   unconditionally rebuilds the model from a read length derived from `samfile.head(5)`.
   On the corpus BAMs the derived length is 151, giving a **2565**-state model — a
   hand-built `read_length=150` model has **2559**. Fingerprint `finder.hmm` *after* the
   call, never before. `genotype -fs -u` does **not** silently fail to converge:
-  `iteratively_update_model` (`advntr/vntr_finder.py:846-876`) rebuilds through the
+  `iteratively_update_model` (`advntr/vntr_finder.py:826-856`) rebuilds through the
   non-enhanced `get_read_matcher_model`, whose `Model.from_matrix` call at
   `advntr/hmm_utils.py:745` raises `AttributeError` on the enhanced backend.
 
@@ -234,7 +258,7 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   papered over.
 
 - **`USE_TRAINED_HMMS = True` crashes.** `advntr/settings.py:9` disables it. The enhanced
-  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:113,120` would raise
+  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:114,121` would raise
   `AttributeError`. The flag was turned off in 2018 for disk usage — a year before the
   backend that lacks the API was written.
 

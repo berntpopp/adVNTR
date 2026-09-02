@@ -18,7 +18,12 @@ GRANDFATHERED = {
     # a content-free `# Logging` header, `SelectedRead.is_mapped` (permanently
     # shadowed by the attribute `__init__` assigns) and the never-read local
     # `reason_why_rejected` -- 1233 -> 1232, no live calling code spent.
-    'advntr/vntr_finder.py': 1232,
+    # Task 8a collapses the triplicated coverage/expected-rate/`identify_frameshift`
+    # block (three near-verbatim copies, 65 lines) into one nested `decide_and_record`
+    # and adds the default-off exact caller's two call-site lines: 1232 -> 1212. The
+    # three sites' differences -- repeat-unit index, count, and the third site's `ID:`
+    # log prefix against the other two's `VID:` -- are parameters, not tidied away.
+    'advntr/vntr_finder.py': 1212,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx

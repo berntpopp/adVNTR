@@ -54,3 +54,16 @@ MIN_READ_LENGTH = None
 #: is what keeps phase 2 thread-safe.
 PRUNE_REVERSE_DECODE = False
 
+
+#: Default-off (Task 8, `--exact-frameshift-caller`; Tier B, AGENTS.md's two-tier rule).
+#: With it False the decision is the shipped `identify_frameshift`
+#: (advntr/vntr_finder.py:187-197) and the code path is byte-for-byte the pre-Task-8 one.
+#: With it True the decision is a one-sided exact binomial over Task 7's integer (k, N)
+#: and the frozen background at FRAMESHIFT_BACKGROUND_FILE -- see advntr/exact_caller.py.
+EXACT_FRAMESHIFT_CALLER = False
+
+#: Path to the operator-supplied frozen background artifact, or None. There is no
+#: default and there must not be one: SPEC Q-RATE shows the public candidate-conditioned
+#: rates are not plug-in estimates for a production null, so with no artifact the exact
+#: caller refuses to run rather than scoring against a number that looks calibrated.
+FRAMESHIFT_BACKGROUND_FILE = None

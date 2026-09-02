@@ -1,7 +1,7 @@
 """The one-sided exact binomial tail `P(K >= k | N, p0)`, stable into the deep tail.
 
 PLAN Task 8 Steps 1-2. This is the statistic that replaces `identify_frameshift`
-(`advntr/vntr_finder.py:186-196`) inside the default-off exact caller; nothing here is
+(`advntr/vntr_finder.py:187-197`) inside the default-off exact caller; nothing here is
 reachable from the shipped decision path. `k` and `N` are Task 7's integer pair off
 `VNTRFinder.last_frameshift_opportunities`, and `p0` comes from an operator-supplied
 frozen background (`advntr/frameshift_background.py`) -- never from a constant in this
