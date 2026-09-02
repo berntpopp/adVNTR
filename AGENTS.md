@@ -87,7 +87,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1233 |
+| `advntr/vntr_finder.py` | 1232 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -220,12 +220,12 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **`wraparound=False` segfaults.** The code relies on negative indexing and `boundscheck`
   is already off. Verified empirically, not theorised.
 
-- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:1079`
+- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:903`
   unconditionally rebuilds the model from a read length derived from `samfile.head(5)`.
   On the corpus BAMs the derived length is 151, giving a **2565**-state model — a
   hand-built `read_length=150` model has **2559**. Fingerprint `finder.hmm` *after* the
   call, never before. `genotype -fs -u` does **not** silently fail to converge:
-  `iteratively_update_model` (`advntr/vntr_finder.py:1022-1045`) rebuilds through the
+  `iteratively_update_model` (`advntr/vntr_finder.py:846-876`) rebuilds through the
   non-enhanced `get_read_matcher_model`, whose `Model.from_matrix` call at
   `advntr/hmm_utils.py:745` raises `AttributeError` on the enhanced backend.
 
@@ -234,7 +234,7 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   papered over.
 
 - **`USE_TRAINED_HMMS = True` crashes.** `advntr/settings.py:9` disables it. The enhanced
-  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:112,119` would raise
+  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:113,120` would raise
   `AttributeError`. The flag was turned off in 2018 for disk usage — a year before the
   backend that lacks the API was written.
 

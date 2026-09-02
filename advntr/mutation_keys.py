@@ -57,15 +57,20 @@ def _partial_end_starts(visited_states):
     return partial_ends
 
 
-def _occurrences_and_bases(visited_states, sequence):
+def occurrence_labels(visited_states):
+    """The one repeat-occurrence numbering, per vpath index.
+
+    Extracted so `advntr/frameshift_opportunities.py` reads occurrences off exactly this
+    function rather than inventing a fourth numbering beside it,
+    `advntr/vntr_finder.py:310-312`'s `current_repeat` and
+    `advntr/hmm_utils.py:160`'s `complete_ru_index`. Like `current_repeat` it counts
+    `unit_start` visits from 0; the string buckets are what `ru_state_count` keys the
+    partial and flank cases on.
+    """
     partial_ends = _partial_end_starts(visited_states)
     occurrences = []
-    emitted_bases = []
-    bases_by_occurrence = defaultdict(list)
     current_occurrence = 'partial_start'
     complete_repeat_index = -1
-    read_index = 0
-
     for index, state in enumerate(visited_states):
         if state.startswith('unit_start'):
             complete_repeat_index += 1
@@ -77,7 +82,17 @@ def _occurrences_and_bases(visited_states, sequence):
         elif state.endswith('prefix'):
             occurrence = 'prefix_flank'
         occurrences.append(occurrence)
+    return occurrences
 
+
+def _occurrences_and_bases(visited_states, sequence):
+    occurrences = occurrence_labels(visited_states)
+    emitted_bases = []
+    bases_by_occurrence = defaultdict(list)
+    read_index = 0
+
+    for index, state in enumerate(visited_states):
+        occurrence = occurrences[index]
         emitted_base = None
         if _consumes_read_base(state):
             emitted_base = sequence[read_index]

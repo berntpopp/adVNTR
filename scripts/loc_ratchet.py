@@ -13,7 +13,12 @@ NEW_FILE_LIMIT = 650
 #: must come DOWN over time -- lower one when you shrink a file, never raise one.
 GRANDFATHERED = {
     'advntr/plot.py': 1445,
-    'advntr/vntr_finder.py': 1233,
+    # Task 7 wires the shadow (k, N) counters in: +11 call-site lines, funded inside
+    # the file by deleting two commented-out imports, two commented-out code lines,
+    # a content-free `# Logging` header, `SelectedRead.is_mapped` (permanently
+    # shadowed by the attribute `__init__` assigns) and the never-read local
+    # `reason_why_rejected` -- 1233 -> 1232, no live calling code spent.
+    'advntr/vntr_finder.py': 1232,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx

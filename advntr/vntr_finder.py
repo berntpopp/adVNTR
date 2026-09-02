@@ -6,12 +6,12 @@ from multiprocessing import Process, Manager, Value, Semaphore
 from random import random
 from collections import defaultdict
 
-# from keras.models import Sequential, load_model
 import pysam
 from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
+from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
                                   extract_raw_mutations, legacy_mutation_candidates)
@@ -26,8 +26,6 @@ from advntr.utils import is_low_quality_read
 require_enhanced_hmm(settings.USE_ENHANCED_HMM)
 from hmm.hmm import Model
 from hmm.base import DiscreteDistribution, State
-
-# from deep_recruitment import get_embedding_of_string, input_dim
 
 
 class GenotypeResult:
@@ -47,9 +45,6 @@ class SelectedRead:
         self.mapq = mapq
         self.is_mapped = reference_start is not None
         self.query_name = query_name
-
-    def is_mapped(self):
-        return self.is_mapped
 
 
 class VNTRFinder:
@@ -72,10 +67,11 @@ class VNTRFinder:
 
         self.is_frameshift_mode = is_frameshift_mode
         self.hmm = None
-        # Replaced each invocation. Evidence retains support for every eligible candidate,
-        # excluding Task 7 opportunities; emitted Context stays called-only and anonymous.
+        # All replaced each invocation. Evidence and Task 7's shadow (k, N) opportunities
+        # cover every eligible candidate; only Context is emitted, called-only, anonymous.
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
 
     def get_copies_for_hmm(self, read_length):
         return int(round(float(read_length) / len(self.reference_vntr.pattern) + 0.5))
@@ -206,6 +202,7 @@ class VNTRFinder:
     def find_frameshift_from_selected_reads(self, selected_reads):
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
         mutations = defaultdict(int)
         prefix_suffix_mutations = defaultdict(int)
         candidate_evidence = defaultdict(list)
@@ -234,6 +231,7 @@ class VNTRFinder:
                                                   max_covered_repeat_ratio, repeat_unit_length))
             max_covered_repeat = self.hmm.read_length_used_to_build_model / repeat_unit_length
         reference_units = [cluster[0] for cluster in pattern_clusters]
+        opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid)
         for selected_read_index, read in enumerate(selected_reads):
             if settings.USE_REF_ALIGNMENT:
                 # TODO: Read Vpath once
@@ -270,15 +268,12 @@ class VNTRFinder:
                                 replace_start = unit_start_points[mutated_repeat_indices[0]] + 1
                                 replace_end = unit_start_points[mutated_repeat_indices[0] + 1]
                                 read.vpath[replace_start:replace_end] = vpath
-                            # else:
-                            #    logging.debug("Don't fix the alignment")
                     else:
                         logging.debug("Matched repeat unit order except the partially mapped units")
 
             visited_states = [state.name for idx, state in read.vpath[1:-1]]
             raw_mutations = extract_raw_mutations(visited_states, read.sequence, reference_units)
             accepted_raw_mutations = []
-            # Logging
             logging.debug("ReadName:{}".format(read.query_name))
             logging.debug("Read:{}".format(read.sequence))
             logging.debug("VisitedStates:{}".format(visited_states))
@@ -295,7 +290,6 @@ class VNTRFinder:
 
             current_repeat = None
             is_valid_read = True
-            reason_why_rejected = ""
 
             # Keep all mutations in a read, update them only if the read is valid
             mutation_count_temp = OrderedDict()
@@ -396,6 +390,11 @@ class VNTRFinder:
                 update_number_of_repeat_bp_matches_in_vpath_for_each_hmm(
                     visited_states, ru_bp_coverage, full_repeat_start, full_repeat_end
                 )
+                # Before the short-circuit below, or every clean read -- the whole
+                # zero-support inventory -- is lost. N follows read.vpath as the in-place
+                # realignment rewrite at :270 leaves it, should issue #5 enable that block.
+                opportunities.observe_read(selected_read_index, read.query_name,
+                                           visited_states, accepted_raw_mutations, ru_state_count)
                 if len(mutation_count_temp) == 0:
                     continue
                 for candidate, legacy_keys in legacy_mutation_candidates(mutation_count_temp):
@@ -423,6 +422,7 @@ class VNTRFinder:
                     ))
 
         self.last_frameshift_evidence = dict((state, tuple(evidence)) for state, evidence in candidate_evidence.items())
+        self.last_frameshift_opportunities = opportunities.finalise(mutations, prefix_suffix_mutations, ru_bp_coverage)
         sorted_mutations = sorted(mutations.items(), key=lambda item: (item[1], item[0]))
         logging.debug('sorted mutations: %s ' % sorted_mutations)
 
@@ -755,7 +755,6 @@ class VNTRFinder:
             if len(read) - 100 > max_length:
                 max_length = len(read) - 100
         max_copies = int(round(max_length / float(len(self.reference_vntr.pattern))))
-        # max_copies = min(max_copies, 2 * len(self.reference_vntr.get_repeat_segments()))
         vntr_matcher = self.build_vntr_matcher_hmm(max_copies)
         observed_copy_numbers = []
         for haplotype in spanning_reads:
@@ -784,7 +783,6 @@ class VNTRFinder:
         haplotypes = haplotyper.get_error_corrected_haplotypes()
         copy_numbers = []
         for haplotype in haplotypes:
-            # print('haplotype: %s' % haplotype)
             logp, vpath = vntr_matcher.viterbi(haplotype)
             rev_logp, rev_vpath = vntr_matcher.viterbi(str(Seq(haplotype).reverse_complement()))
             if logp < rev_logp:
@@ -994,6 +992,7 @@ class VNTRFinder:
         logging.debug('finding frameshift from alignment file for %s' % self.reference_vntr.id)
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
 
         selected_reads = self.select_illumina_reads(alignment_file, unmapped_filtered_reads)
         return self.find_frameshift_from_selected_reads(selected_reads)
