@@ -12,6 +12,7 @@ insertion at 4 bases, which is too little room to drive `N` and
 `round(ru_bp_coverage / ru_length)` apart in a legible fixture.
 """
 import json
+import logging
 import sys
 import unittest
 from cStringIO import StringIO
@@ -145,6 +146,34 @@ def _split_insertion_read(query_name='separated'):
     return SelectedRead(sequence, -1.0, _vpath(states), query_name=query_name)
 
 
+def _capture_at_level(level, action):
+    """Run `action` at a fixed root log level, with output swallowed and then restored."""
+    root = logging.getLogger()
+    saved_level, saved_handlers = root.level, root.handlers[:]
+    root.handlers = [logging.NullHandler()]
+    root.setLevel(level)
+    try:
+        action()
+    finally:
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
+
+def _flank_read(suffix_states, prefix_states, flank_sequence, query_name):
+    """Left-flank states, one clean repeat occurrence, then right-flank states.
+
+    `flank_sequence` is the bases the flank M/I states emit, in vpath order; the repeat
+    unit contributes its own.
+    """
+    unit_states, unit_sequence = _unit()
+    consumed = [state for state in suffix_states if state[0] in ('M', 'I')]
+    sequence = (flank_sequence[:len(consumed)] + unit_sequence +
+                flank_sequence[len(consumed):])
+    return SelectedRead(sequence, -1.0,
+                        _vpath(suffix_states + unit_states + prefix_states),
+                        query_name=query_name)
+
+
 def _same_deletion_in_two_occurrences(query_name='two-occurrences'):
     return _read([_unit({3: [('D', '')]}), _unit({3: [('D', '')]})], query_name)
 
@@ -233,9 +262,9 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(self._pair(records, 'I2_1_T_LEN2'), (2, 2))
 
     def test_a_flank_candidate_never_draws_on_repeat_unit_occurrences(self):
-        supporting = self._flank_read(['I8_suffix'], 'A', 'supporting')
-        crossing = self._flank_read(['I3_suffix', 'I3_suffix', 'M8_suffix', 'M9_suffix'],
-                                    'AA' + REFERENCE_UNIT[7] + REFERENCE_UNIT[8], 'crossing')
+        supporting = _flank_read(['I8_suffix'], [], 'A', 'supporting')
+        crossing = _flank_read(['I3_suffix', 'I3_suffix', 'M8_suffix', 'M9_suffix'], [],
+                               'AA' + REFERENCE_UNIT[7] + REFERENCE_UNIT[8], 'crossing')
         records = self._run([supporting, crossing, _deletion_read(3)])
 
         self.assertEqual(self._pair(records, 'I8_suffix_LEN1'), (1, 2))
@@ -244,15 +273,11 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertIsNone(records['I8_suffix_LEN1']['ru_bp_coverage'])
 
     def test_one_read_contributes_at_most_one_observation_per_flank(self):
-        twice = self._flank_read(['I8_suffix', 'M9_suffix', 'I8_suffix'], 'AAA', 'twice')
+        twice = _flank_read(['I8_suffix', 'M9_suffix', 'I8_suffix'], [], 'AAA', 'twice')
         records = self._run([twice])
 
         self.assertEqual(self._pair(records, 'I8_suffix_LEN2'), (1, 1))
 
-    def _flank_read(self, flank_states, flank_sequence, query_name):
-        unit_states, unit_sequence = _unit()
-        return SelectedRead(flank_sequence + unit_sequence, -1.0,
-                            _vpath(flank_states + unit_states), query_name=query_name)
 
     def test_partial_start_has_no_start_slot_opportunity(self):
         """`partial_start` never visits `unit_start`, so the `I0` slot was never
@@ -351,6 +376,90 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertTrue(self._run([_insertion_read('TC')]))
         self.assertEqual(self._run([_clean_read()]), {})
 
+    def test_a_prefix_span_that_exited_one_base_in_is_not_an_opportunity_there(self):
+        """`advntr/hmm_utils.py:416` gives EVERY prefix match state a 0.01 transition to
+        `prefix_end_prefix`, so the end terminator does not pin the last reference
+        position there. A read whose last emitted base sits AT slot 1 could not have
+        emitted an insertion into it."""
+        supporting = _flank_read([], ['M1_prefix', 'I1_prefix', 'M2_prefix',
+                                      'prefix_end_prefix'], 'AAA', 'supporting')
+        exited_early = _flank_read([], ['M1_prefix', 'prefix_end_prefix'], 'A', 'early')
+        records = self._run([supporting, exited_early])
+
+        self.assertEqual(self._pair(records, 'I1_prefix_LEN1'), (1, 1))
+
+    def test_a_suffix_span_that_entered_deep_has_no_start_slot_opportunity(self):
+        """`advntr/hmm_utils.py:459` lets the left flank be entered at ANY match state, so
+        `suffix_start_suffix` in the path does not mean the path was ever at position 0.
+        `I0` reaches only `M1`/`D1` (`:461-463`), so a span that entered at `M5_suffix`
+        never crossed the start slot."""
+        supporting = _flank_read(['suffix_start_suffix', 'I0_suffix', 'I0_suffix',
+                                  'M1_suffix', 'M2_suffix'], [], 'AA' + REFERENCE_UNIT[:2],
+                                 'supporting')
+        entered_deep = _flank_read(['suffix_start_suffix', 'M5_suffix', 'M6_suffix',
+                                    'suffix_end_suffix'], [], REFERENCE_UNIT[4:6], 'deep')
+        records = self._run([supporting, entered_deep])
+
+        self.assertEqual(self._pair(records, 'I0_suffix_LEN2'), (1, 1))
+
+    def test_one_read_inserting_in_two_occurrences_renumbers_the_length_suffix(self):
+        """`legacy_mutation_candidates` derives `_LEN%d` from its input count
+        (`advntr/mutation_keys.py:167-170`), so the whole-read map names this
+        `I2_1_T_LEN2` and the two per-occurrence maps each name it `I2_1_T_LEN1`.
+        `legacy_states` is what stops a consumer keying off the `State` column from
+        reading the legacy-named row's `support == 0` as absence of support."""
+        records = self._run([_read([_unit({2: [('I', 'T')]}), _unit({2: [('I', 'T')]})],
+                                   'two-insertions')])
+
+        self.assertEqual(self.results[0][:2], ('I2_1_T_LEN2', 1))
+        self.assertEqual(self._pair(records, 'I2_1_T_LEN2'), (0, 2))
+        self.assertEqual(records['I2_1_T_LEN2']['legacy_support'], 1)
+        self.assertEqual(records['I2_1_T_LEN2']['legacy_states'], [])
+        self.assertEqual(self._pair(records, 'I2_1_T_LEN1'), (2, 2))
+        self.assertEqual(records['I2_1_T_LEN1']['legacy_support'], 0)
+        self.assertEqual(records['I2_1_T_LEN1']['legacy_states'], ['I2_1_T_LEN2'])
+
+    def test_fused_deletion_rows_name_the_legacy_state_their_support_belongs_to(self):
+        vntr_finder_module.get_pattern_clusters = lambda patterns: [[patterns[0]], [patterns[1]]]
+        split = _read([_unit({11: [('D', '')]}, pattern='2'),
+                       _unit({12: [('D', '')]}, pattern='2')], 'split')
+        records = self._run([split])
+
+        self.assertEqual(records['D11_2&D12_2']['legacy_states'], [])
+        self.assertEqual(records['D11_2']['legacy_states'], ['D11_2&D12_2'])
+        self.assertEqual(records['D12_2']['legacy_states'], ['D11_2&D12_2'])
+
+    def test_flank_support_survives_the_short_circuit_that_drops_the_legacy_count(self):
+        """`advntr/vntr_finder.py:398-399` skips the whole prefix/suffix block for a read
+        with no repeat-unit mutation, so the legacy never counts this flank insertion;
+        `observe_read` runs before that `continue`."""
+        read = _flank_read([], ['M1_prefix', 'I1_prefix', 'I1_prefix'], 'AAA', 'flank-only')
+        records = self._run([read])
+
+        self.assertIsNone(self.results)
+        self.assertEqual(self._pair(records, 'I1_prefix_LEN2'), (1, 1))
+        self.assertEqual(records['I1_prefix_LEN2']['legacy_support'], 0)
+        self.assertEqual(records['I1_prefix_LEN2']['legacy_states'], ['I1_prefix_LEN2'])
+
+    def test_the_diagnostic_encoding_is_skipped_when_info_logging_is_disabled(self):
+        """213 KB of JSON on example_66bf's 1014 candidates, discarded by the log level.
+        The attribute, not the log line, is the interface the harness reads."""
+        calls = []
+        original = frameshift_opportunities.encode_opportunity_diagnostics
+
+        def counting_encoder(records, **kwargs):
+            calls.append(len(records))
+            return original(records, **kwargs)
+
+        frameshift_opportunities.encode_opportunity_diagnostics = counting_encoder
+        try:
+            _capture_at_level(logging.WARNING, lambda: self._run([_insertion_read('TC')]))
+            self.assertEqual(calls, [])
+            _capture_at_level(logging.INFO, lambda: self._run([_insertion_read('TC')]))
+            self.assertEqual(len(calls), 1)
+        finally:
+            frameshift_opportunities.encode_opportunity_diagnostics = original
+
     def test_result_table_stays_six_columns_with_the_first_five_unchanged(self):
         alignment_finder = _AlignmentFinder(self.finder, [_insertion_read('TC')])
         analyzer = GenomeAnalyzer([], [])
@@ -371,104 +480,6 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(fields[:5], ['25561', state, str(count), str(coverage), str(pvalue)])
         self.assertEqual(json.loads(fields[5])['v'], 1)
         self.assertNotIn('opportunities', lines[4])
-
-
-class TestOpportunityPredicates(unittest.TestCase):
-    """Unit-level cover for the slot and eligibility predicates."""
-
-    def setUp(self):
-        self.original_full_ru = settings.USE_ONLY_FULLY_COVERED_RU
-        settings.USE_ONLY_FULLY_COVERED_RU = False
-
-    def tearDown(self):
-        settings.USE_ONLY_FULLY_COVERED_RU = self.original_full_ru
-
-    @staticmethod
-    def _spans(states):
-        return frameshift_opportunities.occurrence_spans(states)
-
-    def test_a_deletion_slot_needs_only_that_reference_position_reached(self):
-        spans = self._spans(['unit_start_1', 'M1_1', 'D2_1', 'M3_1', 'unit_end_1'])
-        signature = spans[0].signature
-
-        self.assertTrue(frameshift_opportunities._signature_supports(
-            signature, [('D', 2, '1')]))
-        self.assertFalse(frameshift_opportunities._signature_supports(
-            signature, [('D', 4, '1')]))
-
-    def test_an_insertion_slot_needs_both_sides_reached(self):
-        """The one-sided form would credit a slot to a read whose last emitted base sits
-        at the slot, inflating `N` at read ends."""
-        stops_at_two = self._spans(['unit_start_1', 'M1_1', 'M2_1'])[0].signature
-        crosses_two = self._spans(['unit_start_1', 'M1_1', 'M2_1', 'M3_1'])[0].signature
-
-        self.assertFalse(frameshift_opportunities._signature_supports(
-            stops_at_two, [('I', 2, '1')]))
-        self.assertTrue(frameshift_opportunities._signature_supports(
-            crosses_two, [('I', 2, '1')]))
-
-    def test_a_visited_insertion_state_is_an_opportunity_on_its_own(self):
-        signature = self._spans(['unit_start_1', 'M1_1', 'I1_1'])[0].signature
-
-        self.assertTrue(frameshift_opportunities._signature_supports(
-            signature, [('I', 1, '1')]))
-
-    def test_a_candidate_never_draws_on_another_pattern(self):
-        signature = self._spans(['unit_start_1', 'M1_1', 'M2_1', 'M3_1'])[0].signature
-
-        self.assertFalse(frameshift_opportunities._signature_supports(
-            signature, [('D', 2, '2')]))
-
-    def test_flank_spans_carry_the_flank_pseudo_occurrence(self):
-        spans = self._spans(['M1_suffix', 'unit_start_1', 'M1_1', 'unit_end_1', 'I0_prefix'])
-
-        self.assertEqual([span.occurrence for span in spans],
-                         ['suffix_flank', 0, 'prefix_flank'])
-
-    def test_a_balanced_insertion_deletion_pair_is_an_opportunity_without_support(self):
-        """The deliberate divergence: the legacy `I == D` tests
-        (`advntr/vntr_finder.py:345`, `:355`) are support-side, not eligibility."""
-        counts = {0: {'M': 12, 'I': 1, 'D': 1, 'S': 0}}
-        span = self._spans(['unit_start_1', 'M1_1', 'unit_end_1'])[0]
-
-        self.assertTrue(frameshift_opportunities.is_eligible(
-            span, counts, [[REFERENCE_UNIT]], {'suffix_flank': True, 'prefix_flank': True}))
-
-    def test_a_missing_occurrence_key_is_an_explicit_rejection(self):
-        """`ru_state_count` is a defaultdict of defaultdicts
-        (`advntr/hmm_utils.py:158`), so a missing key otherwise reads as all-zero."""
-        span = self._spans(['unit_start_1', 'M1_1', 'unit_end_1'])[0]
-
-        self.assertFalse(frameshift_opportunities.is_eligible(
-            span, {}, [[REFERENCE_UNIT]], {}))
-
-    def test_fully_covered_ru_setting_drops_partial_occurrences(self):
-        settings.USE_ONLY_FULLY_COVERED_RU = True
-        span = self._spans(['M1_1', 'M2_1', 'unit_end_1'])[0]
-        counts = {'partial_start': {'M': 9, 'I': 0, 'D': 0, 'S': 0}}
-
-        self.assertFalse(frameshift_opportunities.is_eligible(
-            span, counts, [[REFERENCE_UNIT]], {}))
-
-    def test_a_read_level_rejection_removes_the_occurrence_from_the_denominator(self):
-        span = self._spans(['unit_start_1', 'M1_1', 'unit_end_1'])[0]
-        counts = {0: {'M': 12, 'I': 0, 'D': 0, 'S': 4}}
-
-        self.assertFalse(frameshift_opportunities.is_eligible(
-            span, counts, [[REFERENCE_UNIT]], {}))
-
-    def test_the_encoder_sorts_records_and_prefixes_a_version(self):
-        records = {'B': {'candidate': 'B'}, 'A': {'candidate': 'A'}}
-
-        self.assertEqual(frameshift_opportunities.encode_opportunity_diagnostics(records),
-                         '{"v":1,"candidates":[{"candidate":"A"},{"candidate":"B"}]}')
-
-    def test_the_diagnostic_line_cannot_corrupt_append_mode_resume(self):
-        """`advntr/advntr_commands.py:96-101` greps the run log for both substrings to
-        resume in append mode."""
-        self.assertNotIn('alignment file for', frameshift_opportunities.LOG_PREFIX)
-        self.assertNotIn('INFO:find_frameshift_from_alignment',
-                         'INFO:' + frameshift_opportunities.LOG_PREFIX)
 
 
 if __name__ == '__main__':

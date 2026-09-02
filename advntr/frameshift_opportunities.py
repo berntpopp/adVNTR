@@ -59,6 +59,21 @@ indel sat at this slot?"*.
 - **Not** applied: `settings.MIN_SUPPORTING_READ_COUNT` or `INDEL_MUTATION_MIN_PVALUE`.
   `N` is a property of the data, not of the caller's threshold.
 
+Two places where `k` deliberately does not equal the legacy per-read count, both carried
+out to the caller rather than left to be inferred:
+
+- **The candidate NAME can differ.** Rebuilding candidates per occurrence both un-fuses
+  adjacent deletions and renumbers an insertion's `_LEN` suffix, so the legacy-named row
+  can sit at `support == 0` beside the occurrence-scoped rows that carry its support.
+  Every row's `legacy_states` field names the shipped `State` strings its support belongs
+  to -- see `per_occurrence_candidates`.
+- **Flank support can exceed the legacy count.** `advntr/vntr_finder.py:398-399`
+  short-circuits the whole prefix/suffix block for a read with no repeat-unit mutation,
+  so the legacy never counts that read's flank indel; `observe_read` is called before
+  that `continue` and `accepted_raw_mutations` already holds the flank raws. A flank row
+  can therefore show `support >= 1` with `legacy_support == 0`. The shadow number is the
+  more complete one, but Task 8 must not read the difference as an error.
+
 The read-level rejections are read-scoped in the legacy loop (`is_valid_read = False`
 then `break`), but they are evaluated here per occurrence. That is the tightest form
 that still preserves the subset property: an occurrence that produced support must have
@@ -84,10 +99,10 @@ LOG_PREFIX = 'frameshift opportunity counters (shadow, no call effect): '
 FLANK_OCCURRENCES = ('suffix_flank', 'prefix_flank')
 PARTIAL_OCCURRENCES = ('partial_start', 'partial_end')
 
-#: `pattern_index`, plus the bit sets and terminator flags the slot rules need. Spans
-#: with an identical signature are pooled, so `finalise` costs candidates x distinct
-#: shapes rather than candidates x reads.
-OccurrenceSpan = namedtuple('OccurrenceSpan', 'occurrence signature patterns')
+#: `signature` is `(pattern_index, reached_mask, inserted_mask, saw_start, saw_end)` --
+#: everything the slot rules need. Spans with an identical signature are pooled, so
+#: `finalise` costs candidates x distinct shapes rather than candidates x reads.
+OccurrenceSpan = namedtuple('OccurrenceSpan', 'occurrence signature')
 
 
 def _position_of(state):
@@ -140,14 +155,18 @@ def occurrence_spans(visited_states):
     for occurrence in order:
         found = patterns[occurrence]
         pattern_index = list(found)[0] if len(found) == 1 else None
-        if pattern_index is None:
+        if len(found) > 1:
             logging.debug('opportunity: occurrence %s carries %d model types; skipped',
                           occurrence, len(found))
+        elif not found:
+            # The ordinary leading `start_random_matches` span, which belongs to no
+            # submodel (`advntr/hmm_utils.py:824-826`) -- not a model conflict.
+            logging.debug('opportunity: occurrence %s has no submodel state; skipped',
+                          occurrence)
         spans.append(OccurrenceSpan(occurrence,
                                     (pattern_index, reached[occurrence],
                                      inserted[occurrence], saw_start[occurrence],
-                                     saw_end[occurrence]),
-                                    found))
+                                     saw_end[occurrence])))
     return spans
 
 
@@ -181,15 +200,57 @@ def parse_components(candidate):
     return components
 
 
-def _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position):
+#: Submodels whose ONLY route to their end terminator starts at the last reference
+#: position: the repeat submodel (`advntr/hmm_utils.py:670-680` -- `D_L`, `M_L`, `I_L`
+#: and nothing else) and the suffix matcher (`:465-472`, same shape). For those, seeing
+#: the end terminator identifies the last position without the counter knowing the
+#: model's length: a path is monotone forward, so the highest position it reached IS
+#: where it exited. The PREFIX matcher is deliberately absent -- `advntr/hmm_utils.py:416`
+#: gives EVERY match state a 0.01 transition to `prefix_end_prefix`, so a prefix span can
+#: carry the end terminator having exited one base in.
+_END_MARKS_LAST_POSITION = ('prefix',)
+
+
+def _end_marks_last_position(pattern_index):
+    return pattern_index not in _END_MARKS_LAST_POSITION
+
+
+def _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position, end_marks_last):
+    """Did this occurrence cross insertion slot `position`?
+
+    `before` at `position == 0` is the start terminator and needs no further gate: `I0`
+    has exactly one non-self predecessor in all three submodels -- `unit_start`
+    (`advntr/hmm_utils.py:663`), `suffix_start` (`:457`), `prefix_start` (`:391`) -- and
+    exactly one set of successors, `{I0, M1, D1}` (`:666-668`, `:461-463`, `:393-395`).
+    So the left flank's any-offset entry (`:459`, `unit_start -> match_states[i]` for
+    EVERY i) cannot inflate it: a span that entered at `M5_suffix` never reaches position
+    1, so `after` is false and the slot is not credited. That is why `saw_end` must not
+    satisfy `after` at position 0 either -- no `I0` anywhere transitions to an end
+    terminator, so an end terminator can never be evidence that slot 0 was crossed.
+
+    `after` at `position >= 1` is the end terminator only when it pins the last reference
+    position (see `_END_MARKS_LAST_POSITION`). Without that gate a read exiting
+    `M1_prefix -> prefix_end_prefix` -- its last emitted base sitting AT the slot -- would
+    be credited for `I1_prefix`, which is precisely the read-end inflation this module
+    rejects, and it is asymmetric between prefix and suffix reads.
+
+    The cost of excluding the prefix matcher is exactly one slot: `I{L}_prefix` is not
+    credited to a prefix span that ran to `prefix_end_prefix` without visiting `I{L}`.
+    Under-counting one boundary slot is the conservative side of a denominator, the flank
+    length is not reachable from here without new arguments the LOC ratchet has no room
+    for, and no such candidate is callable anyway -- `advntr/vntr_finder.py:523` gates
+    prefix candidates on a small leading-nucleotide-run boundary.
+    """
     if (inserted >> position) & 1:
         return True
     if position == 0:
-        before = saw_start
-    else:
-        before = bool((reached >> position) & 1)
-    after = bool((reached >> (position + 1)) & 1) or saw_end
-    return before and after
+        return saw_start and bool((reached >> 1) & 1)
+    if not (reached >> position) & 1:
+        return False
+    if (reached >> (position + 1)) & 1:
+        return True
+    # A monotone forward path exits from its highest reached position.
+    return saw_end and end_marks_last and position == reached.bit_length() - 1
 
 
 def _signature_supports(signature, components):
@@ -203,7 +264,8 @@ def _signature_supports(signature, components):
         if kind == 'D':
             if not (reached >> position) & 1:
                 return False
-        elif not _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position):
+        elif not _insertion_slot_crossed(reached, inserted, saw_start, saw_end, position,
+                                         _end_marks_last_position(pattern_index)):
             return False
     return True
 
@@ -313,24 +375,61 @@ def per_occurrence_candidates(accepted_raw_mutations):
     (`advntr/hmm_utils.py:125-132`, mirrored at `advntr/mutation_keys.py:124-125`), and
     recomputing it per occurrence would mint candidate keys the shipped caller never
     emits.
+
+    Reconstruction changes the candidate NAME in two ways, not one, and both are carried
+    out to the caller as `legacy_states` rather than left for Task 8 to infer:
+
+    - fusion: two deletions in different occurrences give `D11_2` and `D12_2` here where
+      the whole-read map gives the single fused `D11_2&D12_2`;
+    - length renumbering: one read inserting at `I2_1` in two occurrences gives
+      `I2_1_T_LEN1` twice here where the whole-read map gives `I2_1_T_LEN2`, because
+      `legacy_mutation_candidates` derives `_LEN%d` from its input count
+      (`advntr/mutation_keys.py:167-170`).
+
+    In both cases the legacy-named row ends up with `support == 0` while its
+    occurrence-scoped siblings carry the support, so a consumer keying `(k, N)` off the
+    `State` column would read zero for a genuinely supported candidate. Each row's
+    `legacy_states` names the shipped `State` strings its support belongs to; the
+    whole-read reconstruction that produces them is run here on the same
+    `accepted_raw_mutations`, minus the flank raws that `mutation_count_temp` never sees
+    (`advntr/vntr_finder.py:316` diverts them).
+
+    Returns `occurrence -> [(candidate, contributing raw mutations, legacy State names)]`.
     """
     grouped = OrderedDict()
     sources = OrderedDict()
+    whole_read = OrderedDict()
     for raw in sorted(accepted_raw_mutations, key=lambda item: item.visited_index):
         occurrence = raw.repeat_occurrence
         counts = grouped.setdefault(occurrence, OrderedDict())
         counts[raw.legacy_key] = counts.get(raw.legacy_key, 0) + _visit_count(raw)
         sources.setdefault(occurrence, []).append(raw)
+        if occurrence not in FLANK_OCCURRENCES:
+            whole_read[raw.legacy_key] = whole_read.get(raw.legacy_key, 0) + _visit_count(raw)
+    legacy_state_of_key = {}
+    if whole_read:
+        for state, legacy_keys in legacy_mutation_candidates(whole_read):
+            for key in legacy_keys:
+                legacy_state_of_key[key] = state
     candidates = OrderedDict()
     for occurrence, counts in grouped.items():
         if occurrence in FLANK_OCCURRENCES:
             built = _flank_candidates(counts)
         else:
             built = legacy_mutation_candidates(counts)
-        candidates[occurrence] = [
-            (candidate, tuple(raw for raw in sources[occurrence]
-                              if raw.legacy_key in legacy_keys))
-            for candidate, legacy_keys in built]
+        rows = []
+        for candidate, legacy_keys in built:
+            raws = tuple(raw for raw in sources[occurrence]
+                         if raw.legacy_key in legacy_keys)
+            if occurrence in FLANK_OCCURRENCES:
+                # One flank pseudo-occurrence per read per flank, and no fusion at
+                # `advntr/vntr_finder.py:418`, so the two names always agree.
+                states = (candidate,)
+            else:
+                states = tuple(sorted(set(legacy_state_of_key[key] for key in legacy_keys
+                                          if key in legacy_state_of_key)))
+            rows.append((candidate, raws, states))
+        candidates[occurrence] = rows
     return candidates
 
 
@@ -343,6 +442,7 @@ class OpportunityCounter(object):
         self._hmm_match_count = hmm_match_count
         self._is_haploid = is_haploid
         self._support = defaultdict(list)
+        self._rollup = defaultdict(set)
         self._spans = OrderedDict()
 
     def observe_read(self, selected_read_index, query_name, visited_states,
@@ -355,9 +455,10 @@ class OpportunityCounter(object):
                 continue
             identity = (selected_read_index, query_name, span.occurrence)
             self._spans.setdefault(span.signature, []).append(identity)
-            for candidate, raw_mutations in supported.get(span.occurrence, ()):
+            for candidate, raw_mutations, legacy_states in supported.get(span.occurrence, ()):
                 for _raw in raw_mutations:
                     self._support[candidate].append(identity)
+                self._rollup[candidate].update(legacy_states)
 
     def finalise(self, mutations, prefix_suffix_mutations, ru_bp_coverage):
         """Integer `(k, N)` per candidate, with the rejected denominator beside them.
@@ -388,7 +489,10 @@ class OpportunityCounter(object):
                                               opportunities,
                                               legacy_support.get(candidate, 0),
                                               ru_bp_coverage)
-        logging.info('%s%s', LOG_PREFIX, encode_opportunity_diagnostics(records))
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            # Encoding is not free -- 213 KB on example_66bf's 1014 candidates -- and the
+            # attribute, not the log line, is the interface the harness reads.
+            logging.info('%s%s', LOG_PREFIX, encode_opportunity_diagnostics(records))
         return records
 
     def _record(self, candidate, components, support, opportunities, legacy, ru_bp_coverage):
@@ -412,10 +516,16 @@ class OpportunityCounter(object):
         if ru_length and total_bps is not None:
             ratio = int(round(total_bps / float(ru_length)))
             if copies:
+                # Left-to-right exactly as `advntr/vntr_finder.py:444`/`:447` associate
+                # it. `x / (a * b * c)` is equal in exact arithmetic but can differ in
+                # the last ulp, and this field exists only to sit beside the printed
+                # MeanCoverage. Dividing by 1 is exact, so the haploid branch, which has
+                # no ploidy divisor at all, is reproduced by the same expression.
                 ploidy = 1 if self._is_haploid else 2
-                average = total_bps / (float(ru_length) * ploidy * copies)
+                average = float(total_bps) / ru_length / ploidy / copies
         return {'candidate': candidate, 'support': support,
                 'opportunities': opportunities, 'legacy_support': legacy,
+                'legacy_states': sorted(self._rollup.get(candidate, ())),
                 'pattern_index': pattern_index, 'ru_bp_coverage': total_bps,
                 'ru_length': ru_length, 'ru_bp_coverage_ratio': ratio,
                 'avg_bp_coverage': average}
