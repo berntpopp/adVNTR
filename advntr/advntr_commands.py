@@ -83,10 +83,12 @@ def genotype(args, genotype_parser):
         # Same reason as the background preflight below: the only other check is inside
         # `finalise`, which runs after `select_illumina_reads` has decoded every read, so
         # an unwritable path would otherwise cost a full read-selection pass before its
-        # IOError. Opening in append mode is the check that matches the use -- it creates
-        # the file the run will append to and proves the process may write there.
+        # IOError. The mode must be the writer's own 'a+b' and not 'a': `_append_line`
+        # reads the last byte back to avoid welding onto a torn line, so a
+        # writable-but-unreadable path passes an 'a' preflight and then fails inside
+        # `finalise` -- the exact cost this check exists to avoid.
         try:
-            open(args.frameshift_calibration_out, 'a').close()
+            open(args.frameshift_calibration_out, 'a+b').close()
         except IOError as error:
             print_error(genotype_parser, '--frameshift-calibration-out is not writable: '
                                          '%s' % error)

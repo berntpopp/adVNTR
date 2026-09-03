@@ -131,6 +131,12 @@ sink's consumer inherits: `k`'s identities and `N`'s trials are different sets, 
 cardinality is guarded at runtime, and with `N` in the tens of thousands a leaked identity
 is invisible there. Two halves, and they are not equally served:
 
+- **Abort on an unparseable line; never skip one.** First, because it is the cheapest
+  obligation and the easiest to get wrong: a torn line is confined to itself by the writer,
+  but skipping it silently drops that sample's denominators -- including the zero-support
+  states it alone witnessed -- and biases the estimate by an amount nothing downstream can
+  bound. The writer confines the damage; refusing to continue is what makes that worth
+  anything.
 - **Cardinality, offline: yes.** Recompute each row's `opportunities` from `spans` and
   assert it equals the stored integer. That is the round trip, and it fails the moment the
   span table and the rows disagree.

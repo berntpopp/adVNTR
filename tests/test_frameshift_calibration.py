@@ -2,23 +2,21 @@
 
 Every test drives the real `VNTRFinder.find_frameshift_from_selected_reads` from
 synthetic vpaths -- no BAM, no HMM, no decoder -- so the sink is exercised through the
-real `OpportunityCounter.finalise` hook rather than through hand-built records. The
-builders are duplicated from `tests/test_frameshift_opportunities.py:74-118` rather than
-imported, following that file's own note: neither module should constrain the other's
-fixtures.
+real `finalise` hook rather than through hand-built records. The builders are duplicated
+from `tests/test_frameshift_opportunities.py:74-118` rather than imported, per that file's
+own note: neither module should constrain the other's fixtures.
 
-The load-bearing test here is `TestOfflineRecompute`: it recomputes every row's
-`opportunities` from the sink's span table alone, with the shipped `parse_components` and
-`_signature_supports`, and asserts it equals the integer the sink stored. That is what
-makes "the sink stores primitives and derives nothing"
-(`advntr/frameshift_calibration.py`) checkable rather than asserted, and it is the check
-an external fitter runs on every captured line.
+`TestOfflineRecompute` is the load-bearing one. It recomputes every row's `opportunities`
+from the span table alone, with the shipped `parse_components` and `_signature_supports`,
+and asserts it equals the integer the sink stored -- which is what makes "stores
+primitives, derives nothing" checkable rather than asserted, and is the check an external
+fitter runs on every captured line.
 """
 import json
 import os
 import shutil
 import tempfile
-import threading
+import time
 import unittest
 from collections import OrderedDict
 
@@ -51,8 +49,7 @@ class _StubReference(object):
 
 
 class _StubFinder(object):
-    """Only the two attributes the sink reads. Used where a whole traversal would say
-    nothing about the property under test -- the append mechanics."""
+    """Only the two attributes the sink reads, for tests about the append mechanics."""
 
     def __init__(self, vntr_id=1):
         self.reference_vntr = _StubReference(vntr_id)
@@ -60,9 +57,8 @@ class _StubFinder(object):
 
 
 class _SilentParser(object):
-    """Stands in for the `genotype` subparser, exactly as
-    `tests/test_exact_caller.py:477-482` does: `print_error` calls `print_help` and then
-    exits, and a real parser would write its help into the test output."""
+    """Stands in for the `genotype` subparser, as `tests/test_exact_caller.py:477-482`
+    does: `print_error` calls `print_help` and exits, and a real one would print help."""
 
     def print_help(self):
         pass
@@ -125,12 +121,9 @@ def _insertion_read(inserted_sequence, query_name, position=2):
 
 
 def _deletions_in_two_occurrences(first, second, query_name):
-    """One read whose whole-read fusion names a compound `State` its rows do not.
-
+    """One read whose whole-read fusion names a compound `State` its own rows do not:
     `legacy_mutation_candidates` fuses adjacent deletions across occurrences
-    (`advntr/mutation_keys.py:189`), so this read produces occurrence-scoped rows
-    `D%d_1` and `D%d_1` whose `state_identities` name the fused compound -- the shape
-    the subset obligation below is about.
+    (`advntr/mutation_keys.py:189`). The shape the subset obligation is about.
     """
     return _read([_unit({first: [('D', '')]}), _unit({second: [('D', '')]})], query_name)
 
@@ -146,14 +139,19 @@ READS = [
 ]
 
 
-def denominator_from_spans(spans, state):
-    """`N` for any `State`, from the sink's span table alone.
+def spin_until(predicate, what, timeout=60.0):
+    """Busy-wait on a file barrier, with a deadline so a broken race cannot hang the gate.
+    No `sleep`: one cheap enough to use is coarse enough to stagger the writers."""
+    deadline = time.time() + timeout
+    while not predicate():
+        if time.time() > deadline:
+            raise RuntimeError('barrier timed out waiting for %s' % what)
 
-    This is the whole point of the sink and it is written the way an external fitter has
-    to write it: nothing but the shipped `parse_components` and `_signature_supports`,
-    the six-element span entries, and no access to the run. A `State` that produced no
-    row in this sample still gets its denominator here.
-    """
+
+def denominator_from_spans(spans, state):
+    """`N` for any `State`, from the span table alone -- as an external fitter must write
+    it: the shipped `parse_components` and `_signature_supports`, the six-element span
+    entries, no access to the run. A `State` with no row still gets its denominator."""
     components = frameshift_opportunities.parse_components(state)
     if components is None:
         return 0
@@ -234,8 +232,7 @@ class TestDefaultOff(_SinkFixture):
         self.assertFalse(os.path.exists(self.path))
 
     def test_the_records_finalise_returns_are_identical_with_the_sink_on(self):
-        """The sink observes; it must not move a single field of what `finalise` returns,
-        or a calibration capture would not be measuring the run it claims to measure."""
+        """The sink observes: it must not move a field of what `finalise` returns."""
         off = self._run()
         settings.FRAMESHIFT_CALIBRATION_OUT = self.path
         on = self._run()
@@ -244,10 +241,15 @@ class TestDefaultOff(_SinkFixture):
         self.assertTrue(os.path.exists(self.path))
 
     def test_the_writer_itself_refuses_to_write_when_no_path_is_configured(self):
-        """The guard lives in one place, so a future second call site cannot lose it, and
-        it runs before anything is read off the finder -- `None` here proves that."""
+        """One guard, and it runs before anything is read off the finder."""
         self.assertIsNone(
             frameshift_calibration.write_if_configured(None, False, [], {}))
+
+    def test_a_counter_without_its_finder_refuses_rather_than_naming_no_vntr(self):
+        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+        self.assertRaises(ValueError, frameshift_calibration.write_if_configured,
+                          None, False, [], {})
+        self.assertFalse(os.path.exists(self.path))
 
 
 class TestLineShape(_SinkFixture):
@@ -264,8 +266,7 @@ class TestLineShape(_SinkFixture):
                           'version', 'vntr_id'])
 
     def test_a_candidate_carries_every_record_field_except_the_span_list(self):
-        """A field added to `_record` must reach the fitter or be excluded on purpose;
-        this fails on the next field added, which is the point."""
+        """A field added to `_record` must reach the fitter or be excluded on purpose."""
         document = self._capture()
         records = self.counters[-1].finalise({}, {}, {})
 
@@ -274,8 +275,7 @@ class TestLineShape(_SinkFixture):
             self.assertEqual(set(candidate), expected)
 
     def test_opportunity_spans_is_the_only_field_dropped(self):
-        """2,644,839 bytes against the 59,082-byte span table that regenerates it, on one
-        real example_66bf capture -- see this sink's module docstring."""
+        """2,644,839 bytes against the 59,082-byte span table that regenerates it."""
         self.assertEqual(frameshift_calibration.EXCLUDED_FIELDS, ('opportunity_spans',))
 
     def test_a_span_entry_is_a_signature_and_a_count(self):
@@ -294,9 +294,8 @@ class TestLineShape(_SinkFixture):
             self.assertGreaterEqual(count, 1)
 
     def test_the_span_table_counts_distinct_identities(self):
-        """`count` is `len(set(identities))`, matching what `finalise` puts in its own
-        span ids (`advntr/frameshift_opportunities.py:550-552`); anything else would make
-        the offline `N` disagree with the run's."""
+        """`count` is `len(set(identities))`, as `finalise` computes it
+        (`advntr/frameshift_opportunities.py:550-552`); anything else desynchronises N."""
         document = self._capture()
         counter = self.counters[-1]
 
@@ -321,8 +320,7 @@ class TestOfflineRecompute(_SinkFixture):
         self.assertGreater(checked, 0, 'no row had a denominator to check')
 
     def test_the_recompute_fails_when_the_span_table_and_the_rows_disagree(self):
-        """A round trip that cannot fail proves nothing. Drop one span's count and the
-        rows it fed must stop matching."""
+        """A round trip that cannot fail proves nothing: perturb one span count."""
         document = self._capture()
         document['spans'][0][5] += 1
 
@@ -335,18 +333,15 @@ class TestOfflineRecompute(_SinkFixture):
 
     def test_a_state_with_no_row_at_all_still_has_a_denominator(self):
         """The entire reason this sink exists. `D9_1` fired in no read, so `finalise`
-        emits no row for it (`advntr/frameshift_opportunities.py:554` iterates
-        `set(legacy_support) | set(self._support)`) and the run log carries no `N` for
-        it. The span table still does."""
+        emits no row for it (`advntr/frameshift_opportunities.py:554`). Spans still do."""
         document = self._capture()
 
         self.assertNotIn('D9_1', [row['candidate'] for row in document['candidates']])
         self.assertGreater(denominator_from_spans(document['spans'], 'D9_1'), 0)
 
     def test_the_denominator_of_an_unobserved_state_matches_an_observed_sibling(self):
-        """`D9_1` and `D3_1` are the same shape at different positions and every span
-        here spans the whole unit, so the state that fired and the state that did not
-        must get the same denominator -- the property the fitter relies on."""
+        """Same shape, different position, and every span here covers the whole unit, so
+        the state that fired and the one that did not must get the same denominator."""
         document = self._capture()
         observed = [row for row in document['candidates']
                     if row['candidate'] == 'D3_1'][0]
@@ -356,12 +351,10 @@ class TestOfflineRecompute(_SinkFixture):
 
 
 class TestSubsetObligation(_SinkFixture):
-    """`advntr/exact_caller.py:163-185` states the obligation and cannot meet it.
-
-    `decide`'s `support > opportunities` guard compares two integers, so an identity
-    attributed to a `State` whose own spans never contained it is invisible at runtime
-    with `N` in the tens of thousands. The consumer that holds the span inventory has to
-    assert the set property itself. This is the first place in the tree that can.
+    """`advntr/exact_caller.py:163-185` states the obligation and cannot meet it: `decide`
+    compares two integers, so an identity credited to a `State` whose own spans never held
+    it is invisible at runtime with `N` in the tens of thousands. The consumer holding the
+    span inventory must assert the set property, and this is the first place that can.
     """
 
     @staticmethod
@@ -413,8 +406,7 @@ class TestDeterminismAndAnonymity(_SinkFixture):
         self.assertEqual(lines[0], lines[1])
 
     def test_no_read_name_reaches_the_sink(self):
-        """Mirrors `tests/test_frameshift_context.py:199`. `anonymous_identities` drops
-        `query_name` and the sink must not reintroduce it."""
+        """Mirrors `tests/test_frameshift_context.py:199`: no name may be reintroduced."""
         settings.FRAMESHIFT_CALIBRATION_OUT = self.path
         self._run()
 
@@ -435,9 +427,8 @@ class TestDeterminismAndAnonymity(_SinkFixture):
 
 class TestAppendSemantics(_SinkFixture):
     def test_two_invocations_append_two_self_identifying_lines(self):
-        """`genotype -vid` takes a comma-separated list and
-        `advntr/genome_analyzer.py:215-216` loops over it, so one file holds several
-        invocations and each has to say which VNTR it scored."""
+        """`advntr/genome_analyzer.py:215-216` loops over `-vid`, so one file holds
+        several invocations and each has to say which VNTR it scored."""
         settings.FRAMESHIFT_CALIBRATION_OUT = self.path
         self._run(vntr_id=25561)
         self._run(vntr_id=915594)
@@ -457,63 +448,101 @@ class TestAppendSemantics(_SinkFixture):
 
 
 class TestTheAppendIsNotCorruptibleByAccident(_SinkFixture):
-    """One line is 443 KB on a real capture, which is far above the size at which an
-    append is atomic. A reviewer drove eight barrier-synchronised appends into one file
-    and 7 of the 8 lines came out unparseable. The path is contracted to be per-sample;
-    a sink that corrupts silently when that contract is broken is still not one to point
-    at an irreplaceable capture."""
+    """One line is 443 KB on a real capture, far above the size at which an append is
+    atomic: stdio splits it into many `write()` calls and two writers interleave. A review
+    drove eight barrier-synchronised appends into one file and got 0 of 8 lines back.
+
+    **Forking real processes is not incidental.** The thread version caught a deleted lock
+    in 14 of 36 runs, 39%, green every time WITH it -- honest, but not a guard. Threads
+    share one file table and one GIL, so the window with two writers inside `write()` is
+    far narrower than between processes, and forked children take separate open file
+    descriptions, which is also what makes `flock` contend. After the rework: 20 of 20
+    caught with the lock deleted, 12 of 12 green with it. Each child pre-builds its line
+    BEFORE the barrier and calls `_append_line`, so the only thing racing is the critical
+    section and not milliseconds of `json.dumps`.
+    """
 
     #: Big enough that stdio splits the write into many `write()` calls, which is what
-    #: makes interleaving possible at all. A few hundred KB, like the real line.
+    #: makes interleaving possible at all. ~794 KB, larger than the real 443 KB line.
     ROWS = 3000
+
+    #: Rounds of the race per run. One forked round is already lethal; three costs
+    #: little and removes the last of the flakiness in the other direction.
+    ROUNDS = 3
+    WRITERS = 8
 
     def _bulky_records(self, tag):
         records = OrderedDict()
         for index in range(self.ROWS):
             name = 'D%d_1' % index
-            records[name] = {'candidate': name, 'support': index,
+            records[name] = {'candidate': name, 'support': index, 'ru_length': 1,
                              'opportunities': index + 1, 'support_identities': (),
                              'opportunity_spans': (), 'legacy_support': 0,
                              'legacy_states': [tag * 20], 'state_identities': {},
                              'pattern_index': '1', 'ru_bp_coverage': 1,
-                             'ru_length': 1, 'ru_bp_coverage_ratio': 1,
-                             'avg_bp_coverage': 1.0}
+                             'ru_bp_coverage_ratio': 1, 'avg_bp_coverage': 1.0}
         return records
 
-    def test_eight_concurrent_writers_leave_eight_parseable_lines(self):
-        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
-        start = threading.Event()
-        errors = []
-
-        def append(index):
-            records = self._bulky_records(chr(ord('a') + index))
-            start.wait()
+    def _race(self, round_index, lines):
+        """Fork one writer per line, release them all at once, return their exit codes."""
+        go = os.path.join(self.directory, 'go-%d' % round_index)
+        ready = [os.path.join(self.directory, 'ready-%d-%d' % (round_index, index))
+                 for index in range(len(lines))]
+        children = []
+        for index, line in enumerate(lines):
+            pid = os.fork()
+            if pid:
+                children.append(pid)
+                continue
+            status = 1
             try:
-                frameshift_calibration.write_if_configured(
-                    _StubFinder(index), False, [], records)
-            except Exception as error:          # pragma: no cover - a failure is the bug
-                errors.append(error)
+                open(ready[index], 'w').close()
+                spin_until(lambda: os.path.exists(go), 'the barrier')
+                frameshift_calibration._append_line(self.path, line)
+                status = 0
+            finally:
+                # Never unwind into the parent's test run, and never flush its buffers.
+                os._exit(status)
+        spin_until(lambda: all(os.path.exists(item) for item in ready), 'every writer')
+        open(go, 'w').close()
+        return [os.waitpid(pid, 0)[1] for pid in children]
 
-        writers = [threading.Thread(target=append, args=(index,)) for index in range(8)]
-        for writer in writers:
-            writer.start()
-        start.set()
-        for writer in writers:
-            writer.join()
+    def test_eight_forked_writers_leave_eight_parseable_lines_every_round(self):
+        lines = [frameshift_calibration.sink_line(
+            index, READ_LENGTH, False, [],
+            self._bulky_records(chr(ord('a') + index)))
+            for index in range(self.WRITERS)]
+        self.assertGreater(len(lines[0]), 700000, 'must span several write() calls')
 
-        self.assertEqual(errors, [])
-        lines = self._lines()
-        self.assertEqual(len(lines), 8)
-        self.assertGreater(len(lines[0]), 100000, 'the payload must be big enough to '
-                                                  'be split into several write() calls')
-        self.assertEqual(sorted(json.loads(line)['vntr_id'] for line in lines),
-                         list(range(8)))
+        for round_index in range(self.ROUNDS):
+            self.assertEqual(set(self._race(round_index, lines)), set([0]))
+
+            written = self._lines()
+            self.assertEqual(len(written), self.WRITERS * (round_index + 1))
+            recovered = sorted(json.loads(line)['vntr_id'] for line in written)
+            self.assertEqual(recovered,
+                             sorted(list(range(self.WRITERS)) * (round_index + 1)))
+
+    def test_the_public_writer_goes_through_the_locked_append(self):
+        """The race targets `_append_line`; this stops a future write around it."""
+        calls = []
+        original = frameshift_calibration._append_line
+        frameshift_calibration._append_line = lambda path, line: calls.append((path, line))
+        try:
+            settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+            returned = self._run()
+        finally:
+            frameshift_calibration._append_line = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], self.path)
+        self.assertIn('"vntr_id":1', calls[0][1])
+        self.assertTrue(returned)
 
 
 class TestATornLineCostsOnlyItself(_SinkFixture):
     def test_an_unterminated_final_line_is_not_welded_to_the_next_one(self):
-        """A process killed mid-write leaves a fragment with no newline. Appending onto
-        it would destroy the next good record as well as the torn one."""
+        """Appending onto a killed writer's fragment destroys the next record too."""
         with open(self.path, 'w') as handle:
             handle.write('{"schema":"advntr.frameshift.calibration","torn":tru')
         settings.FRAMESHIFT_CALIBRATION_OUT = self.path
@@ -560,8 +589,7 @@ class TestKeysAreSortedEverywhere(_SinkFixture):
 
 
 class TestTheStartupPreflight(_SinkFixture):
-    """The only other check is inside `finalise`, which runs after every read has been
-    decoded, so a bad path costs a full read-selection pass before its IOError."""
+    """The only other check is inside `finalise`, after every read has been decoded."""
 
     class _Args(object):
         alignment_file = 'reads.txt'
@@ -588,10 +616,20 @@ class TestTheStartupPreflight(_SinkFixture):
 
         self.assertIn('not writable', self._genotype_exit(unwritable))
 
+    def test_a_writable_but_unreadable_path_is_refused_too(self):
+        """A preflight opening `a` would pass a write-only path and fail inside
+        `finalise` instead -- after the decode this check exists to save."""
+        if os.geteuid() == 0:
+            raise unittest.SkipTest('root ignores the read bit, so there is no such path')
+        write_only = os.path.join(self.directory, 'write-only.jsonl')
+        open(write_only, 'w').close()
+        os.chmod(write_only, 0222)
+
+        self.assertIn('not writable', self._genotype_exit(write_only))
+
     def test_a_writable_path_is_accepted_and_created(self):
-        """`reads.txt` is not a BAM, so an accepted run stops at the input format -- which
-        is how this tells "accepted" from "refused", the idiom
-        `tests/test_exact_caller.py:492-494` uses."""
+        """`reads.txt` is not a BAM, so an accepted run stops at the input format --
+        how this tells "accepted" from "refused" (`tests/test_exact_caller.py:492-494`)."""
         message = self._genotype_exit(self.path)
 
         self.assertIn('file format is not supported', message)

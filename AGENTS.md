@@ -285,10 +285,20 @@ post-change flag-on.** That is a one-BAM measurement, not a corpus claim.
   it is a guard against a mistake, not a licence to share a path. The writer also checks
   that the file ends with a newline and supplies the missing one first, so a process
   killed mid-write costs its own line and not the next good one.
-- **The path is preflighted at startup** (`advntr/advntr_commands.py:82-92`), opened for
-  append and closed, exactly as `--frameshift-background` is validated ten lines below.
-  Without it an unwritable path raises `IOError` only inside `finalise` -- after every read
-  has been decoded.
+- **A consumer must ABORT on an unparseable line, and must never skip one.** This is the
+  contract, not a suggestion. Skipping a torn line silently drops that sample's
+  denominators, including every zero-support state it was the only witness for, and biases
+  the estimate in a direction nobody can bound afterwards. The writer's job is to confine
+  the damage to one line; refusing to continue is what makes that confinement worth
+  anything.
+- **The path is preflighted at startup** (`advntr/advntr_commands.py:82-95`), opened
+  `a+b` -- the writer's own mode, because it reads the last byte back -- and closed,
+  exactly as `--frameshift-background` is validated ten lines below. Without it an
+  unwritable path raises `IOError` only inside `finalise`, after every read has been
+  decoded. The preflight CREATES the file, so a run that fails later leaves a 0-byte sink:
+  an empty file therefore does not distinguish "the run failed" from "there were no
+  decision sites". That distinction belongs to the capture controller's manifest, which
+  records each sample's exit status, and deliberately not to this flag.
 - **`ru_length` is a row field.** `ru_length`, `ru_bp_coverage`, `ru_bp_coverage_ratio` and
   `avg_bp_coverage` sit on candidate rows, so a pattern that produced no row at all
   contributes none of them and its repeat-unit length is not recoverable from the line. `N`
