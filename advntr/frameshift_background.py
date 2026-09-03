@@ -127,7 +127,7 @@ def _validated_probability(path, field, value):
 def _validated_state_keys(path, raw_states):
     """Refuse any `states` key that a byte-exact lookup can never match.
 
-    Task 8i. `BackgroundModel.probability_for` (`:86-88`) does `self.states.get(state,
+    Task 8i. `BackgroundModel.probability_for` (`:102-104`) does `self.states.get(state,
     default)` with no normalisation, so this function's job is to make every surviving
     key a plausible byte-exact `State` before it ever reaches that dict. Five rules, all
     refusing rather than warning, because a silent partial load is exactly the failure
@@ -153,40 +153,76 @@ def _validated_state_keys(path, raw_states):
        broken -- the calibration meant one state, not two rates for it -- and running
        this check first means the refusal names both keys and what they collide to,
        rather than reporting only the dirtier of the pair as if the clean one were not
-       implicated.
+       implicated. Every colliding group in the document is collected and named in ONE
+       refusal, not just the first group found: a 21,000-key artifact should cost one
+       edit-and-rerun cycle for its whole set of collisions, not one per group.
     3. **Empty.** `''.strip() == ''`, so rule 4 below cannot catch it, and an empty
        string is even less like a `State` than a whitespace-padded one.
-    4. **Differs from its own `.strip()`.** The defect this task exists to close: no
-       shipped `State` string carries leading or trailing whitespace (rule 5's grammar
-       agrees -- see below), so a key that does can never match a lookup and would
-       silently score against `default_probability` instead.
-    5. **Not a form the shipped grammar can produce.** `advntr/mutation_keys.py`'s
-       `legacy_mutation_candidates` is what emits every repeat-unit `State` string, and
-       `advntr/frameshift_opportunities.py:parse_components` already parses that output
-       back apart; a key it rejects cannot be one of them either. This rule is decided
-       on evidence, not on reading the two modules against each other: a run over the
-       real caller (`advntr_harness.capture.build_finder` +
-       `select_illumina_reads` + `find_frameshift_from_selected_reads`,
-       `finder.last_frameshift_evidence.keys()`) across 7 of the 8 public `example_*`
-       BAMs (all six public hg19 files plus the one public hg38 file; `example_7a61`
-       omitted only for wall-clock cost, per AGENTS.md's profiling note that its
-       `select_illumina_reads` alone runs ~197s serial) produced 5,452 distinct
-       candidate/State strings -- including both repeat-unit and prefix/suffix flank
-       forms (`I0_prefix_LEN1`, and critically `D148_suffix`, the undecorated deletion
-       flank form with no `_LEN` suffix, which is the shape most likely to trip a naive
-       grammar) and 2,622 compound `A&B&...` forms -- and `parse_components` accepted
-       every single one: 0 rejections. Given that, a grammar check here cannot refuse a
-       valid artifact under this population without evidence contradicting the above,
-       so it is enabled rather than left out. NOT proof for all 21,000 future keys, only
-       the strongest evidence available before that artifact exists; if a calibrated
-       artifact is later refused here, that is new evidence, not a reason to have
-       skipped the check.
+    4. **Differs from its own `.strip()` -- checked for the whole key AND, separately,
+       for each of its `&`-joined components.** The defect this task exists to close.
+       Fix round 1 shipped only the whole-key half of this rule, which is incomplete in
+       exactly the class of bug it exists to close: `"D3_1 &D4_1"` carries no LEADING or
+       TRAILING whitespace on the *whole* key, so it passed that check, and it passed
+       rule 5's grammar check too -- `parse_components` never validates a component's
+       pattern-index field's *contents*, only that one is present (rule 5's `fields[1]`
+       below) -- so the whole key loaded silently and scored against
+       `default_probability`: the identical failure this task exists to close, moved one
+       character to the right of a `&`. No shipped compound `State` ever carries
+       whitespace in any component either (rule 5's structural argument covers every
+       component the same way it covers a lone key), and this is not an edge case for
+       the calibration artifact: 2,642 of the 5,500 real states collected as rule 5's
+       evidence (below) are compound `A&B&...` forms. The component check iterates
+       `key.split('&')` in the key's own left-to-right order, not sorted -- a `&`-joined
+       key's component order is already the caller's canonical order, so nothing here
+       needs re-deriving it.
+    5. **Not a form the shipped grammar can produce.** The load-bearing argument is
+       structural closure, not corpus corroboration -- the run below corroborates it, it
+       is not the whole basis for it. Every `I`/`D` HMM state name this fork can ever
+       produce is built by `advntr/hmm_utils.py` as `'%s%s_%s' % (kind, index,
+       hmm_name)` for `kind` in `('I', 'D')` (also `'M'`, addressed below) --
+       `advntr/hmm_utils.py:368,373,376` (the prefix flank matcher) and `:435,440,443`
+       (the suffix flank matcher), where `hmm_name` is the hardcoded literal `'prefix'`
+       or `'suffix'`; `:642,646,649` (`get_repeat_matcher_enhanced_hmm`, the one
+       `advntr/frameshift_opportunities.py`'s own docstring cites as what production
+       decodes against), where `hmm_name` is `str(pattern_count)`, an incrementing
+       integer counter -- so `index` is always an integer and `hmm_name` is always
+       exactly `'prefix'`, `'suffix'`, or an integer, at every construction site, for
+       any VNTR. `advntr/vntr_finder.py:336-337`
+       (`if not current_state.startswith('I') and not current_state.startswith('D'):
+       continue`) admits only `I`/`D` states into any candidate at all, so an `M` state
+       -- the one kind `parse_components` itself refuses -- structurally never reaches a
+       `states` key either; that branch has no legitimate case to refuse. Past that,
+       `advntr/mutation_keys.py`'s `legacy_mutation_candidates` only ever APPENDS: one
+       emitted base character (`get_emitted_basepair_from_visited_states`,
+       `advntr/hmm_utils.py:125-132`, sliced straight out of the read's own
+       already-uppercased sequence -- never whitespace, by construction of a DNA
+       sequence string) and a literal `_LEN<int>` suffix, joining multiple components
+       with `&`. So every key this fork can ever generate, for any cohort, matches
+       `[ID]<int>_(<int>|prefix|suffix)(_<base>)?(_LEN<int>)?(&...)*` -- digits,
+       underscores, `&`, and the constant substrings `prefix`/`suffix`/`LEN`, nothing
+       else, ever -- and `parse_components` accepts that whole family unconditionally
+       (`kind in ('I', 'D')`, `len(fields) >= 2`,
+       `advntr/frameshift_opportunities.py:236-250`). The rule cannot refuse a
+       legitimate key for any cohort, not only the public one.
 
-    Rules 2-5 iterate `sorted(raw_states)` (or, for rule 2, `sorted` collision groups)
-    so which key gets named in a refusal is deterministic across runs. Rule 1 must run
-    over every key, unsorted-safe, before any of the others -- `.strip()` on a
-    non-string key raises `AttributeError`, not a validation error the operator can act
-    on, so rules 2-5 may not run until rule 1 has confirmed every key is a string.
+       Corroboration: a run over the real caller (`advntr_harness.capture.build_finder`
+       + `select_illumina_reads` + `find_frameshift_from_selected_reads`,
+       `finder.last_frameshift_evidence.keys()`) across all eight public `example_*`
+       BAMs produced 5,500 distinct candidate/State strings -- including both
+       repeat-unit and prefix/suffix flank forms (`I0_prefix_LEN1`, and `D148_suffix`,
+       the undecorated deletion flank form with no `_LEN` suffix) and 2,642 compound
+       `A&B&...` forms -- and `parse_components` accepted every single one: 0
+       rejections. This is not proof for all 21,000 future keys, only the strongest
+       evidence available before that artifact exists; if a calibrated artifact is later
+       refused here, that is new evidence to act on, not a reason to have skipped the
+       check -- the structural argument above is what actually carries the "for any
+       cohort" claim.
+
+    Rules 2-5 iterate `sorted(raw_states)` (or, for rule 2, sorted collision groups) so
+    which key gets named in a refusal is deterministic across runs. Rule 1 must run over
+    every key, unsorted-safe, before any of the others -- `.strip()` on a non-string key
+    raises `AttributeError`, not a validation error the operator can act on, so rules 2-5
+    may not run until rule 1 has confirmed every key is a string.
     """
     for key in raw_states:
         if not isinstance(key, basestring):  # noqa: F821
@@ -195,11 +231,15 @@ def _validated_state_keys(path, raw_states):
     stripped_to_originals = {}
     for key in raw_states:
         stripped_to_originals.setdefault(key.strip(), []).append(key)
-    for stripped, originals in sorted(stripped_to_originals.items()):
-        if len(originals) > 1:
-            _refuse(path, 'keys %s all collide once stripped, to %r -- the artifact '
-                          'names the same state more than once'
-                    % (', '.join(repr(key) for key in sorted(originals)), stripped))
+    collisions = [(stripped, sorted(originals))
+                  for stripped, originals in sorted(stripped_to_originals.items())
+                  if len(originals) > 1]
+    if collisions:
+        _refuse(path, 'states keys collide once stripped: %s -- the artifact names '
+                      'the same state more than once'
+                % '; '.join('%s all collide to %r'
+                            % (', '.join(repr(key) for key in originals), stripped)
+                            for stripped, originals in collisions))
 
     for key in sorted(raw_states):
         if key == '':
@@ -208,6 +248,12 @@ def _validated_state_keys(path, raw_states):
             _refuse(path, 'states key %r has leading or trailing whitespace, so it can '
                           'never byte-match an emitted State and would silently score '
                           'against default_probability instead' % (key,))
+        for component in key.split('&'):
+            if component != component.strip():
+                _refuse(path, 'states key %r has whitespace around its %r component, '
+                              'so it can never byte-match an emitted State and would '
+                              'silently score against default_probability instead'
+                        % (key, component))
         if parse_components(key) is None:
             _refuse(path, 'states key %r is not a form the shipped grammar can produce '
                           '(advntr/frameshift_opportunities.py:parse_components '

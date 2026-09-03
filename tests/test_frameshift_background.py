@@ -192,6 +192,23 @@ class TestBackgroundArtifact(unittest.TestCase):
         self.assertIn(repr(' D3_1'), message)
         self.assertIn('whitespace', message)
 
+    def test_internal_whitespace_around_a_compound_separator_is_refused_rather_than_silently_scored_against_default(self):
+        """Fix round 1's own gap, found by adversarial review: `"D3_1 &D4_1"` has no
+        LEADING or TRAILING whitespace on the *whole* key, so the whole-key `.strip()`
+        check alone (`_validated_state_keys` rule 4, first half) let it through -- and
+        `parse_components` never validates a component's pattern-index field's
+        *contents* (rule 5), so the grammar check let it through too. The key then
+        loaded and `probability_for('D3_1&D4_1')` -- the clean form a real compound
+        candidate actually uses -- would have silently returned `default_probability`:
+        the identical failure this task exists to close, just moved one character to
+        the right of the `&`. 2,642 of the 5,500 real states this task's evidence run
+        collected are compound `A&B&...` forms, so this was not an edge case."""
+        message = self._refusal(dict(VALID, states={'D3_1 &D4_1': 0.125}))
+
+        self.assertIn(repr('D3_1 &D4_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('whitespace', message)
+
     def test_an_empty_states_key_is_refused(self):
         """`''.strip() == ''`, so the whitespace rule alone cannot catch this -- it
         needs its own rule."""
@@ -212,12 +229,26 @@ class TestBackgroundArtifact(unittest.TestCase):
         self.assertIn(repr('D3_1 '), message)
         self.assertIn('collide', message)
 
+    def test_two_separate_collision_groups_are_both_reported_in_one_refusal(self):
+        """`_validated_state_keys` rule 2 collects every colliding group before
+        refusing, rather than raising on the first one found: a 21,000-key artifact
+        should cost one edit-and-rerun cycle for its whole set of collisions, not one
+        per group. Two unrelated pairs here must both be named in the single message
+        this call raises."""
+        message = self._refusal(dict(VALID, states={
+            'D3_1': 0.1, 'D3_1 ': 0.2, 'D4_1': 0.3, ' D4_1': 0.4,
+        }))
+
+        self.assertIn(repr('D3_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn(repr('D4_1'), message)
+        self.assertIn(repr(' D4_1'), message)
+
     def test_a_key_the_shipped_grammar_cannot_produce_is_refused(self):
-        """`advntr/frameshift_opportunities.py:parse_components` is what
-        `advntr/mutation_keys.py`'s emitted `State` strings must parse back through;
-        the grammar-check decision (this function's docstring) rests on it accepting
-        every one of 5,452 real states collected from 7 public BAMs. A key with no
-        leading `I`/`D` submodel letter is not one of them."""
+        """See `_validated_state_keys` rule 5's docstring for why this rule cannot
+        refuse a legitimate key for any cohort -- the structural-closure argument, and
+        the public-corpus run that corroborates it. A key with no leading `I`/`D`
+        submodel letter is not one of the forms that argument covers."""
         message = self._refusal(dict(VALID, states={'not_a_state': 0.125}))
 
         self.assertIn(repr('not_a_state'), message)
@@ -241,14 +272,14 @@ class TestBackgroundArtifact(unittest.TestCase):
     def test_real_emitted_state_forms_all_load_and_score_by_their_own_key(self):
         """Guards against the new validation quietly rejecting everything. Every key
         below is a real `State`/candidate string this fork's caller emitted on public
-        BAMs -- `finder.last_frameshift_evidence.keys()` from Task 8i's evidence run
-        (`_validated_state_keys`'s docstring: 7 of the 8 public `example_*` BAMs, 5,452
-        distinct candidates collected): a plain deletion, an insertion with its emitted
-        base and length, the undecorated
-        deletion flank form with no `_LEN` suffix (the shape most likely to trip a naive
-        grammar check), an insertion flank form, and a multi-component deletion+
-        insertion compound. All five must load, and each must score by its own
-        state-specific rate rather than falling back to the shared default."""
+        BAMs, collected via `finder.last_frameshift_evidence.keys()` for
+        `_validated_state_keys` rule 5's evidence run (that docstring has the full
+        corpus and counts): a plain deletion, an insertion with its emitted base and
+        length, the undecorated deletion flank form with no `_LEN` suffix (the shape
+        most likely to trip a naive grammar check), an insertion flank form, and a
+        multi-component deletion+insertion compound. All five must load, and each must
+        score by its own state-specific rate rather than falling back to the shared
+        default."""
         real_states = {
             'D3_1': 0.10,
             'I10_1_A_LEN1': 0.11,
