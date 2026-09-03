@@ -89,6 +89,41 @@ identity has already been through `anonymous_identities`, which drops `query_nam
 (`advntr/frameshift_opportunities.py:157-171`), and this module adds no field of its own
 -- the property `tests/test_frameshift_context.py:199` pins for Task 5's Context column.
 
+## One file per sample, and why the line does not name the sample
+
+**The path must be per-sample, and the writer enforces what it can.** One line is 443 KB
+on the measured capture, far above the size at which an append is atomic: an adversarial
+review drove eight barrier-synchronised appends into one file and 7 of the 8 lines came
+out unparseable. `_append_line` therefore holds an exclusive `fcntl.flock` for the whole
+write, so two adVNTR processes sharing a path serialise instead of interleaving. That is a
+guard against a mistake, not a licence. `flock` is advisory -- it binds only writers that
+take it -- so it does not survive a filesystem that ignores it or a third-party writer.
+Point each sample at its own file.
+
+It also never appends onto a torn line. A process killed mid-write leaves a final line
+with no terminating newline, and an append that ignored that would weld its own line onto
+the fragment and destroy TWO records instead of one. `_append_line` checks the last byte
+and inserts the missing newline first, so a torn write costs exactly its own line.
+
+**A line carries no sample identifier, deliberately.** `vntr_id` says which VNTR was
+scored; nothing says which sample. adVNTR is not told a cohort sample id and must not be:
+the confidentiality boundary PLAN Task 8 works inside is cleaner when the tool cannot
+learn one, and a sample id written into the artifact would travel with every copy of it.
+Sample identity comes from the sink's PATH and the capture controller's manifest -- one
+file per sample, named by the controller -- and never from the line. State the consequence
+rather than leave it to be discovered: if several samples are appended into one file
+anyway, the partition a line came from is unrecoverable offline, and the `flock` above
+does not help, because the lines are all well-formed and all anonymous.
+
+**`ru_length` is a row field, so a pattern with no rows has none.** `ru_length`,
+`ru_bp_coverage`, `ru_bp_coverage_ratio` and `avg_bp_coverage` are carried per CANDIDATE
+row, looked up by that row's own `pattern_index` (`_record`). A pattern that produced no
+candidate row at all appears nowhere in `candidates`, so its repeat-unit length is not
+recoverable from the line -- `spans` carries the pattern index but none of the model
+geometry behind it. A fitter needing `ru_length` for such a pattern must take it from the
+model, not from the capture. `N` is unaffected: it comes from `spans` alone, which is the
+whole point of the table.
+
 ## What a consumer must check, and the one thing it cannot
 
 `advntr/exact_caller.py`'s `aggregate_evidence` docstring states the obligation this
@@ -116,7 +151,9 @@ is invisible there. Two halves, and they are not equally served:
   substitute for the per-sample set test on a calibration corpus, and a future task that
   wants that test has to widen this format and pay the 4.7x.
 """
+import fcntl
 import json
+import os
 
 from advntr import settings
 
@@ -173,7 +210,9 @@ def write_if_configured(finder, is_haploid, span_counts, records):
 
     Appended, not written: a resumed run (`advntr/advntr_commands.py:111-121` supports
     `--append`) must add to the capture rather than truncate it, and each line says which
-    VNTR it scored so duplicates are removable offline.
+    VNTR it scored so duplicates are removable offline. The path is expected to be
+    per-sample -- see the module docstring for what the writer guarantees when it is not,
+    and for what no writer can guarantee.
     """
     path = settings.FRAMESHIFT_CALIBRATION_OUT
     if not path:
@@ -185,9 +224,40 @@ def write_if_configured(finder, is_haploid, span_counts, records):
     line = sink_line(finder.reference_vntr.id,
                      finder.hmm.read_length_used_to_build_model,
                      is_haploid, span_counts, records)
-    handle = open(path, 'a')
-    try:
-        handle.write(line + '\n')
-    finally:
-        handle.close()
+    _append_line(path, line)
     return line
+
+
+def _append_line(path, line):
+    """Append one line: whole, terminated, and never welded onto a torn predecessor.
+
+    Two hazards, both operational rather than arithmetic, and both demonstrated rather
+    than theorised (module docstring):
+
+    - **A 443 KB append is not atomic.** stdio splits it into many `write()` calls, so two
+      processes sharing a path interleave and neither line parses. `LOCK_EX` is held
+      across the whole write INCLUDING the flush, because releasing the lock with data
+      still in the buffer would put the interleaving straight back.
+    - **A killed process leaves an unterminated final line.** Appending after that welds
+      the new line onto the fragment, costing a good record as well as the torn one. The
+      last byte is checked and the missing newline supplied first.
+
+    `flock` is advisory: it orders writers that take it and nothing else. It makes a
+    mistake survivable; it does not make a shared path supported.
+    """
+    handle = open(path, 'a+b')
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        prefix = ''
+        if size:
+            handle.seek(size - 1)
+            if handle.read(1) != '\n':
+                prefix = '\n'
+            handle.seek(0, os.SEEK_END)
+        handle.write(prefix + line + '\n')
+        handle.flush()
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()

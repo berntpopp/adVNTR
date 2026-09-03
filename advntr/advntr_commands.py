@@ -79,6 +79,17 @@ def genotype(args, genotype_parser):
     # Deliberately not gated on --exact-frameshift-caller: the capture that estimates a
     # background must run with the caller OFF, or it perturbs the calls it is measuring.
     settings.FRAMESHIFT_CALIBRATION_OUT = args.frameshift_calibration_out
+    if args.frameshift_calibration_out:
+        # Same reason as the background preflight below: the only other check is inside
+        # `finalise`, which runs after `select_illumina_reads` has decoded every read, so
+        # an unwritable path would otherwise cost a full read-selection pass before its
+        # IOError. Opening in append mode is the check that matches the use -- it creates
+        # the file the run will append to and proves the process may write there.
+        try:
+            open(args.frameshift_calibration_out, 'a').close()
+        except IOError as error:
+            print_error(genotype_parser, '--frameshift-calibration-out is not writable: '
+                                         '%s' % error)
     if args.exact_frameshift_caller:
         if args.frameshift_background is None:
             print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '

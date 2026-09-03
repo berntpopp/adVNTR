@@ -270,6 +270,29 @@ post-change flag-on.** That is a one-BAM measurement, not a corpus claim.
   offline consumer can re-check the cardinality but not the set; carrying the identities
   costs 28x on the span table (1,683,975 bytes, 26,593 pairs). The set property is pinned
   in-process instead, by `tests/test_frameshift_calibration.py`'s `TestSubsetObligation`.
+- **One file per sample, and the line never names the sample.** `vntr_id` says which VNTR
+  was scored; nothing says which sample, deliberately -- adVNTR is not told a cohort sample
+  id and the confidentiality boundary is cleaner when it cannot learn one. Sample identity
+  comes from the sink's path and the capture controller's manifest. The consequence, which
+  has to be stated rather than discovered: append several samples into one file and the
+  partition a line came from is unrecoverable.
+- **A shared path is a mistake the writer survives, not a supported mode.** A line is
+  443 KB, far above the size at which an append is atomic: eight barrier-synchronised
+  writers into one file leave 4 of 8 lines unparseable without a lock (measured, at the
+  real line size). The append holds an exclusive `fcntl.flock` across the whole write
+  including the flush, which makes the same eight-way test come out 8 of 8 parseable with
+  every `vntr_id` recovered. `flock` is advisory and binds only writers that take it, so
+  it is a guard against a mistake, not a licence to share a path. The writer also checks
+  that the file ends with a newline and supplies the missing one first, so a process
+  killed mid-write costs its own line and not the next good one.
+- **The path is preflighted at startup** (`advntr/advntr_commands.py:82-92`), opened for
+  append and closed, exactly as `--frameshift-background` is validated ten lines below.
+  Without it an unwritable path raises `IOError` only inside `finalise` -- after every read
+  has been decoded.
+- **`ru_length` is a row field.** `ru_length`, `ru_bp_coverage`, `ru_bp_coverage_ratio` and
+  `avg_bp_coverage` sit on candidate rows, so a pattern that produced no row at all
+  contributes none of them and its repeat-unit length is not recoverable from the line. `N`
+  is unaffected -- it comes from `spans` alone.
 - **The write is inside a counter method, which is a smell that is argued rather than
   hidden.** `OpportunityCounter._spans` is the only place the inventory exists, and
   `advntr/frameshift_calibration.py`'s module docstring carries the argument. The write is

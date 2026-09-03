@@ -18,8 +18,11 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
+from collections import OrderedDict
 
+from advntr import advntr_commands
 from advntr import frameshift_calibration
 from advntr import frameshift_opportunities
 from advntr import settings
@@ -40,6 +43,29 @@ class _FakeState(object):
 
 class _FakeHMM(object):
     read_length_used_to_build_model = READ_LENGTH
+
+
+class _StubReference(object):
+    def __init__(self, vntr_id):
+        self.id = vntr_id
+
+
+class _StubFinder(object):
+    """Only the two attributes the sink reads. Used where a whole traversal would say
+    nothing about the property under test -- the append mechanics."""
+
+    def __init__(self, vntr_id=1):
+        self.reference_vntr = _StubReference(vntr_id)
+        self.hmm = _FakeHMM()
+
+
+class _SilentParser(object):
+    """Stands in for the `genotype` subparser, exactly as
+    `tests/test_exact_caller.py:477-482` does: `print_error` calls `print_help` and then
+    exits, and a real parser would write its help into the test output."""
+
+    def print_help(self):
+        pass
 
 
 class _CallingFinder(VNTRFinder):
@@ -428,6 +454,148 @@ class TestAppendSemantics(_SinkFixture):
         lines = self._lines()
         self.assertEqual(len(lines), 2)
         self.assertTrue(json.loads(lines[0])['resumed'])
+
+
+class TestTheAppendIsNotCorruptibleByAccident(_SinkFixture):
+    """One line is 443 KB on a real capture, which is far above the size at which an
+    append is atomic. A reviewer drove eight barrier-synchronised appends into one file
+    and 7 of the 8 lines came out unparseable. The path is contracted to be per-sample;
+    a sink that corrupts silently when that contract is broken is still not one to point
+    at an irreplaceable capture."""
+
+    #: Big enough that stdio splits the write into many `write()` calls, which is what
+    #: makes interleaving possible at all. A few hundred KB, like the real line.
+    ROWS = 3000
+
+    def _bulky_records(self, tag):
+        records = OrderedDict()
+        for index in range(self.ROWS):
+            name = 'D%d_1' % index
+            records[name] = {'candidate': name, 'support': index,
+                             'opportunities': index + 1, 'support_identities': (),
+                             'opportunity_spans': (), 'legacy_support': 0,
+                             'legacy_states': [tag * 20], 'state_identities': {},
+                             'pattern_index': '1', 'ru_bp_coverage': 1,
+                             'ru_length': 1, 'ru_bp_coverage_ratio': 1,
+                             'avg_bp_coverage': 1.0}
+        return records
+
+    def test_eight_concurrent_writers_leave_eight_parseable_lines(self):
+        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+        start = threading.Event()
+        errors = []
+
+        def append(index):
+            records = self._bulky_records(chr(ord('a') + index))
+            start.wait()
+            try:
+                frameshift_calibration.write_if_configured(
+                    _StubFinder(index), False, [], records)
+            except Exception as error:          # pragma: no cover - a failure is the bug
+                errors.append(error)
+
+        writers = [threading.Thread(target=append, args=(index,)) for index in range(8)]
+        for writer in writers:
+            writer.start()
+        start.set()
+        for writer in writers:
+            writer.join()
+
+        self.assertEqual(errors, [])
+        lines = self._lines()
+        self.assertEqual(len(lines), 8)
+        self.assertGreater(len(lines[0]), 100000, 'the payload must be big enough to '
+                                                  'be split into several write() calls')
+        self.assertEqual(sorted(json.loads(line)['vntr_id'] for line in lines),
+                         list(range(8)))
+
+
+class TestATornLineCostsOnlyItself(_SinkFixture):
+    def test_an_unterminated_final_line_is_not_welded_to_the_next_one(self):
+        """A process killed mid-write leaves a fragment with no newline. Appending onto
+        it would destroy the next good record as well as the torn one."""
+        with open(self.path, 'w') as handle:
+            handle.write('{"schema":"advntr.frameshift.calibration","torn":tru')
+        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+        self._run()
+
+        lines = self._lines()
+        self.assertEqual(len(lines), 2)
+        self.assertRaises(ValueError, json.loads, lines[0])
+        self.assertEqual(json.loads(lines[1])['schema'],
+                         'advntr.frameshift.calibration')
+
+    def test_a_properly_terminated_file_gains_no_blank_line(self):
+        with open(self.path, 'w') as handle:
+            handle.write('{"resumed":true}\n')
+        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+        self._run()
+
+        with open(self.path) as handle:
+            self.assertNotIn('\n\n', handle.read())
+
+
+class TestKeysAreSortedEverywhere(_SinkFixture):
+    """`sort_keys=True` is the whole determinism guarantee, and until this test nothing
+    died when it was removed -- a probe that set `sort_keys=False` survived the suite."""
+
+    def _assert_sorted(self, node, where):
+        if isinstance(node, OrderedDict):
+            keys = list(node)
+            self.assertEqual(keys, sorted(keys), 'unsorted keys at %s' % where)
+            for key, value in node.items():
+                self._assert_sorted(value, '%s.%s' % (where, key))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                self._assert_sorted(value, '%s[%d]' % (where, index))
+
+    def test_every_object_in_the_line_has_its_keys_in_sorted_order(self):
+        settings.FRAMESHIFT_CALIBRATION_OUT = self.path
+        self._run()
+
+        document = json.loads(self._lines()[0],
+                              object_pairs_hook=OrderedDict)
+        self._assert_sorted(document, 'line')
+        self.assertGreater(len(document), 1, 'a single-key object would prove nothing')
+
+
+class TestTheStartupPreflight(_SinkFixture):
+    """The only other check is inside `finalise`, which runs after every read has been
+    decoded, so a bad path costs a full read-selection pass before its IOError."""
+
+    class _Args(object):
+        alignment_file = 'reads.txt'
+        fasta = None
+        nanopore = False
+        pacbio = False
+        threads = 1
+        prune_reverse = False
+        exact_frameshift_caller = False
+        frameshift_background = None
+        frameshift_calibration_out = None
+        expansion = False
+        coverage = None
+
+    def _genotype_exit(self, sink):
+        args = self._Args()
+        args.frameshift_calibration_out = sink
+        with self.assertRaises(SystemExit) as caught:
+            advntr_commands.genotype(args, _SilentParser())
+        return str(caught.exception)
+
+    def test_an_unwritable_path_is_refused_at_startup(self):
+        unwritable = os.path.join(self.directory, 'no-such-directory', 'sink.jsonl')
+
+        self.assertIn('not writable', self._genotype_exit(unwritable))
+
+    def test_a_writable_path_is_accepted_and_created(self):
+        """`reads.txt` is not a BAM, so an accepted run stops at the input format -- which
+        is how this tells "accepted" from "refused", the idiom
+        `tests/test_exact_caller.py:492-494` uses."""
+        message = self._genotype_exit(self.path)
+
+        self.assertIn('file format is not supported', message)
+        self.assertTrue(os.path.exists(self.path))
 
 
 if __name__ == '__main__':
