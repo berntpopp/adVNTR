@@ -169,6 +169,99 @@ class TestBackgroundArtifact(unittest.TestCase):
 
         self.assertEqual(model.probability_for('D3_1'), 0.25)
 
+    # -- Task 8i: `probability_for` is a byte-exact dict lookup with no normalisation
+    # (`advntr/frameshift_background.py:probability_for`), so a `states` key that is
+    # not byte-identical to an emitted `State` string never matches anything and
+    # silently scores that state against `default_probability`. These tests trip each
+    # rejection deliberately -- `tests/test_ratchets.py`'s model: a gate nobody has
+    # seen fail is a gate nobody knows works.
+
+    def test_a_trailing_space_key_is_refused_rather_than_silently_scored_against_default(self):
+        """The defect this task closes. Before `_validated_state_keys` existed, a
+        `states` key of `"D3_1 "` loaded without error and `probability_for('D3_1')`
+        silently returned `default_probability` -- the state was never looked up under
+        its dirty key, and nothing said so. Now the artifact is refused outright."""
+        message = self._refusal(dict(VALID, states={'D3_1 ': 0.125}))
+
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('whitespace', message)
+
+    def test_a_leading_space_key_is_refused(self):
+        message = self._refusal(dict(VALID, states={' D3_1': 0.125}))
+
+        self.assertIn(repr(' D3_1'), message)
+        self.assertIn('whitespace', message)
+
+    def test_an_empty_states_key_is_refused(self):
+        """`''.strip() == ''`, so the whitespace rule alone cannot catch this -- it
+        needs its own rule."""
+        message = self._refusal(dict(VALID, states={'': 0.125}))
+
+        self.assertIn('empty', message)
+
+    def test_two_keys_that_collide_once_stripped_are_both_named_in_the_refusal(self):
+        """JSON does not catch this itself: `"D3_1"` and `"D3_1 "` are different raw
+        text, so both survive `json.load` as separate `states` entries -- only a
+        literally repeated key string would collapse, silently, inside `json.load`
+        before this module ever sees the dict. An artifact carrying both means the
+        calibration named the same state twice, which is refused rather than silently
+        picking one."""
+        message = self._refusal(dict(VALID, states={'D3_1': 0.1, 'D3_1 ': 0.2}))
+
+        self.assertIn(repr('D3_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('collide', message)
+
+    def test_a_key_the_shipped_grammar_cannot_produce_is_refused(self):
+        """`advntr/frameshift_opportunities.py:parse_components` is what
+        `advntr/mutation_keys.py`'s emitted `State` strings must parse back through;
+        the grammar-check decision (this function's docstring) rests on it accepting
+        every one of 5,452 real states collected from 7 public BAMs. A key with no
+        leading `I`/`D` submodel letter is not one of them."""
+        message = self._refusal(dict(VALID, states={'not_a_state': 0.125}))
+
+        self.assertIn(repr('not_a_state'), message)
+        self.assertIn('grammar', message)
+
+    def test_a_non_string_key_is_refused(self):
+        """JSON object keys are always strings -- `json.load` cannot hand
+        `_validated_state_keys` anything else, so this path is unreachable through
+        `load_background_model`'s public file-based API. Checked anyway because
+        `raw_states` is just a `dict` with no guarantee every caller came through JSON,
+        so this test calls the validator directly, the same way
+        `test_no_probability_literal_lives_in_the_module_code` reaches past the public
+        API to exercise something a JSON fixture cannot express."""
+        with self.assertRaises(BackgroundModelError) as caught:
+            frameshift_background._validated_state_keys('some/path.json', {1: 0.125})
+
+        message = str(caught.exception)
+        self.assertIn('some/path.json', message)
+        self.assertIn('not a string', message)
+
+    def test_real_emitted_state_forms_all_load_and_score_by_their_own_key(self):
+        """Guards against the new validation quietly rejecting everything. Every key
+        below is a real `State`/candidate string this fork's caller emitted on public
+        BAMs -- `finder.last_frameshift_evidence.keys()` from Task 8i's evidence run
+        (`_validated_state_keys`'s docstring: 7 of the 8 public `example_*` BAMs, 5,452
+        distinct candidates collected): a plain deletion, an insertion with its emitted
+        base and length, the undecorated
+        deletion flank form with no `_LEN` suffix (the shape most likely to trip a naive
+        grammar check), an insertion flank form, and a multi-component deletion+
+        insertion compound. All five must load, and each must score by its own
+        state-specific rate rather than falling back to the shared default."""
+        real_states = {
+            'D3_1': 0.10,
+            'I10_1_A_LEN1': 0.11,
+            'D148_suffix': 0.12,
+            'I0_prefix_LEN1': 0.13,
+            'D10_2&I10_2_C_LEN9': 0.14,
+        }
+        model = load_background_model(self._write(dict(VALID, states=real_states)))
+
+        for state, probability in real_states.items():
+            self.assertEqual(model.probability_for(state), probability)
+        self.assertEqual(model.probability_for('I7_2_G_LEN1'), VALID['default_probability'])
+
     def test_no_probability_literal_lives_in_the_module_code(self):
         """SPEC Q-RATE: the public candidate-conditioned summaries (~1e-3, 3.0e-4,
         1.7e-4) are conditional on candidates with support >= 3 and are not plug-in
