@@ -455,7 +455,7 @@ class TestTheDeclineGuards(unittest.TestCase):
 
         7.8x, in the anti-conservative direction -- the one
         `advntr/frameshift_opportunities.py:126-129` identifies as the wrong one to
-        optimise against, since a smaller `N` or a larger `k` lowers the p-value. The
+        optimise against, since a smaller `N` or a larger `k` lowers the p-value.
         The figure is illustrative and hand-built, and so was the baseline it used to
         be quoted against. Measured over all eight public BAMs against what actually
         ships, `sum`/`max` differs in `k` on 21 states across five of them -- worst case

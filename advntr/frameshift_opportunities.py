@@ -94,8 +94,10 @@ adjacent occurrences fuses to `D11_2&D12_2` where a read deleting only 11 does n
 a consumer reading "row R names State S" as "all of R's support belongs to S" attaches
 the whole component's support to the minority `State` permanently. Measured on
 `example_dfc3_hg19_subset.bam` before Task 8f fixed it, the six-deletion state at
-positions 17-22 of pattern 2 scored `k = 300` where 11 occurrences produced it. None of
-the three fields is encoded into the diagnostics line; see `UNENCODED_FIELDS`.
+positions 17-22 of pattern 2 scored `k = 300` where its OWN ROW records 11 occurrences.
+`advntr/exact_caller.py` quotes 17 for that state: the AGGREGATE of this row's 11 and 3
+each from two siblings -- a different quantity, not a different measurement. None of the
+three fields is encoded into the diagnostics line; see `UNENCODED_FIELDS`.
 
 The read-level rejections are read-scoped in the legacy loop (`is_valid_read = False`
 then `break`), but they are evaluated here per occurrence. That is the tightest form

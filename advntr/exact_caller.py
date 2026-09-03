@@ -43,10 +43,13 @@ than quietly dropped.** It unioned BOTH halves, crediting a `State` with every s
 entire support and with the union of the siblings' `opportunity_spans`, and argued that
 the span union was what made `k <= N` structural. Measured on the public corpus, that
 `k` gave the six-deletion state at positions 17-22 of pattern 2 on
-`example_dfc3_hg19_subset.bam` `k = 300` where 17 occurrences produced it -- the entire
-245-occurrence support of its five-deletion sibling came with it, of which 3 belong --
-and gave `I10_6_A_LEN2` on `example_6c28_hg19_subset.bam` `k = 347` where 2 occurrences
-produced it. Inflating `k` shrinks the tail and inflating `N` widens it, so the two
+`example_dfc3_hg19_subset.bam` `k = 300` where the attribution below AGGREGATES 17 --
+the entire 245-occurrence support of its five-deletion sibling came with it, of which 3
+belong, and 3 more of the 44 belonging to a second sibling, on top of the state's own
+row's 11. (`advntr/frameshift_opportunities.py`'s docstring quotes that 11 for the same
+state: it is the OWN ROW, not this aggregate. Both are measured; they are different
+quantities.) It gave `I10_6_A_LEN2` on `example_6c28_hg19_subset.bam` `k = 347` where 2
+occurrences produced it. Inflating `k` shrinks the tail and inflating `N` widens it, so the two
 errors point opposite ways; the `k` error is hundreds against tens, so the net is
 anti-conservative.
 
