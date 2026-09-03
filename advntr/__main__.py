@@ -104,6 +104,12 @@ def main():
                                        help='frozen background model for '
                                             '--exact-frameshift-caller; there is no '
                                             'built-in default')
+    genotype_others_group.add_argument('--frameshift-calibration-out', type=str, metavar='<file>', default=None,
+                                       help='append one JSON Lines record per VNTR with '
+                                            'the frameshift candidate rows and the span '
+                                            'signature table behind their denominators, '
+                                            'for offline background calibration '
+                                            '(default-off; changes no call)')
     genotype_others_group.add_argument('-u', '--update', action='store_true', default=False,
                                        help='set this flag to iteratively update the model')
     genotype_others_group.add_argument('-vid', '--vntr_id', type=str, metavar='<text>', default=None,

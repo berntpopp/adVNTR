@@ -499,6 +499,9 @@ class TestTheStartupCheckDoesNotWaitForReadSelection(_ExactCallerTestCase):
         prune_reverse = False
         exact_frameshift_caller = True
         frameshift_background = None
+        #: The calibration capture is independent of this flag and off here, so these
+        #: startup tests exercise the background refusal alone.
+        frameshift_calibration_out = None
         expansion = False
         coverage = None
 

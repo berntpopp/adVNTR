@@ -51,6 +51,7 @@ does not mention muscle in its first line.
 | `python -m advntr_harness.capture --tier 1 --out tests/golden` | Re-capture Tier 1 fixtures |
 | `make tier2` | Full-corpus equivalence check against `tests/golden/tier2_manifest.json` |
 | `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | What `make tier2` runs, with an explicit `--out` |
+| `advntr genotype -fs -vid 25561 ... --frameshift-calibration-out F.jsonl` | Append one calibration capture record per VNTR. Default-off; changes no call |
 
 ## Layout
 
@@ -228,6 +229,54 @@ from `--frameshift-background <file>`.
   boundary gates, so the null is for a truncated population; a compound `State`'s
   aggregated event is "at least one component", whose null rate is not a per-slot `p0`;
   and an aggregated `k == 0` is reported at a tail of 1.0 with a warning.
+
+### `--frameshift-calibration-out`: a capture surface, not a caller
+
+The third default-off flag (Task 8h; `advntr/settings.py` `FRAMESHIFT_CALIBRATION_OUT`,
+default `None`, written from `args.frameshift_calibration_out` at
+`advntr/advntr_commands.py:81`). It moves no decision at all: with it set,
+`OpportunityCounter.finalise` appends one record and returns exactly what it returned
+before. **Measured through the real CLI on `example_66bf_hg19_subset.bam`: the emitted
+six-column table is byte-identical across pre-change flag-off, post-change flag-off and
+post-change flag-on.** That is a one-BAM measurement, not a corpus claim.
+
+- **Why it exists at all.** PLAN Task 8 Step 3 has to freeze a background on a calibration
+  partition, and its estimator needs `N` for a `State` in the samples where that `State`
+  did NOT fire. Nothing carried it: `finalise` emits rows only for
+  `set(legacy_support) | set(self._support)`, the encoded diagnostics drop the identity
+  and span fields (`UNENCODED_FIELDS`), and `advntr/vntr_finder.py:429` publishes only the
+  records. The counter's span inventory -- the one object that generates every missing
+  denominator -- had never left the process.
+- **Independent of `--exact-frameshift-caller`, deliberately.** A calibration capture runs
+  with the caller OFF so it cannot perturb the calls it is measuring; the two flags are
+  read separately and neither implies the other.
+- **The format is JSON Lines, append.** One line per `finalise`, so a multi-VNTR
+  `-vid a,b` run does not overwrite itself, and every line carries `schema`, `version`,
+  `vntr_id`, `read_length` and `is_haploid` so a duplicate from a resumed run is
+  detectable offline. `sort_keys`, compact separators, no read name -- the anonymity
+  property `tests/test_frameshift_context.py:199` pins, re-checked here against the real
+  capture: 0 of 19,884 query names in the BAM appear anywhere in the file.
+- **It stores primitives and derives nothing, and that is checkable.** The line carries
+  the candidate rows and the span signature table with a distinct-identity count per
+  signature; `opportunity_spans` is excluded because it is exactly derivable from that
+  table with the shipped `parse_components` and `_signature_supports`. On the
+  `example_66bf` capture: 443,002 bytes total (1,014 rows, 1,373 spans), of which the span
+  table is 59,082, against 2,644,839 bytes for `opportunity_spans` alone -- 45x the input
+  that regenerates it. Recomputing every row's `opportunities` from the span table
+  reproduced the run exactly, 0 mismatches over all 1,014 rows.
+- **One obligation the format cannot discharge.** `advntr/exact_caller.py` says a consumer
+  holding the span table must assert that the identities behind `k` are among the trials
+  `N` counts. The exported table carries a COUNT per signature, not the identities, so an
+  offline consumer can re-check the cardinality but not the set; carrying the identities
+  costs 28x on the span table (1,683,975 bytes, 26,593 pairs). The set property is pinned
+  in-process instead, by `tests/test_frameshift_calibration.py`'s `TestSubsetObligation`.
+- **The write is inside a counter method, which is a smell that is argued rather than
+  hidden.** `OpportunityCounter._spans` is the only place the inventory exists, and
+  `advntr/frameshift_calibration.py`'s module docstring carries the argument. The write is
+  not routed through `advntr/vntr_finder.py`, which stays at exactly 1212 lines; the
+  counter is handed the finder it belongs to at its single construction site
+  (`advntr/vntr_finder.py:238`) purely so a line can say which VNTR and which read length
+  it scored.
 
 ## Git and PRs
 

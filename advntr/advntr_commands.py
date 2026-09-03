@@ -76,6 +76,9 @@ def genotype(args, genotype_parser):
     settings.PRUNE_REVERSE_DECODE = args.prune_reverse
     settings.EXACT_FRAMESHIFT_CALLER = args.exact_frameshift_caller
     settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
+    # Deliberately not gated on --exact-frameshift-caller: the capture that estimates a
+    # background must run with the caller OFF, or it perturbs the calls it is measuring.
+    settings.FRAMESHIFT_CALIBRATION_OUT = args.frameshift_calibration_out
     if args.exact_frameshift_caller:
         if args.frameshift_background is None:
             print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '

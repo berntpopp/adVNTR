@@ -235,7 +235,7 @@ class VNTRFinder:
                                                   max_covered_repeat_ratio, repeat_unit_length))
             max_covered_repeat = self.hmm.read_length_used_to_build_model / repeat_unit_length
         reference_units = [cluster[0] for cluster in pattern_clusters]
-        opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid)
+        opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid, self)
         for selected_read_index, read in enumerate(selected_reads):
             if settings.USE_REF_ALIGNMENT:
                 # TODO: Read Vpath once

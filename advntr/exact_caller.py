@@ -171,9 +171,15 @@ def aggregate_evidence(records, state):
     The stronger check is deliberately not made here. A row carries span IDS and not the
     identities behind them, which is what keeps `finalise` at candidates x distinct
     shapes instead of candidates x reads (`advntr/frameshift_opportunities.py`'s module
-    docstring), so the data a true subset test needs is not in `records` by design. A
-    calibration consumer, which reads the span signature table and therefore does have
-    those identities, MUST assert the subset property when it reconstructs these pairs.
+    docstring), so the data a true subset test needs is not in `records` by design.
+
+    **Where that check lives, stated as it actually shipped.** Task 8h's sink
+    (`advntr/frameshift_calibration.py`) exports the span table as a COUNT per signature,
+    not the identities behind it, so an offline consumer can reconstruct every `N` and
+    re-check the cardinality but cannot ask which signature a given `(read, occurrence)`
+    sat under. The set property is asserted in-process instead, against the counter's own
+    `_spans`, by `tests/test_frameshift_calibration.py`'s `TestSubsetObligation` -- which
+    also carries a fixture where a leak really does clear the runtime guard.
     """
     own = records.get(state)
     if own is None:

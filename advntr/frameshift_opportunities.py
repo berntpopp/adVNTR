@@ -110,6 +110,7 @@ import json
 import logging
 
 from advntr.mutation_keys import legacy_mutation_candidates, occurrence_labels
+from advntr import frameshift_calibration
 from advntr import settings
 
 
@@ -496,7 +497,8 @@ def per_occurrence_candidates(accepted_raw_mutations):
 class OpportunityCounter(object):
     """Accumulate integer `(k, N)` per candidate over one `find_frameshift` invocation."""
 
-    def __init__(self, pattern_clusters, estimated_ru_count, hmm_match_count, is_haploid):
+    def __init__(self, pattern_clusters, estimated_ru_count, hmm_match_count, is_haploid, finder=None):
+        self._finder = finder  # Read ONLY by the sink; see `write_if_configured`.
         self._pattern_clusters = pattern_clusters
         self._estimated_ru_count = estimated_ru_count
         self._hmm_match_count = hmm_match_count
@@ -566,6 +568,8 @@ class OpportunityCounter(object):
                                               opportunities, identities, spans,
                                               legacy_support.get(candidate, 0),
                                               ru_bp_coverage)
+        frameshift_calibration.write_if_configured(self._finder, self._is_haploid,
+                                                   span_counts, records)
         if logging.getLogger().isEnabledFor(logging.INFO):
             # Encoding is not free -- 213 KB on example_66bf's 1014 candidates -- and the
             # attribute, not the log line, is the interface the harness reads.

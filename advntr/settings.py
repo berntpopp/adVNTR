@@ -67,3 +67,12 @@ EXACT_FRAMESHIFT_CALLER = False
 #: rates are not plug-in estimates for a production null, so with no artifact the exact
 #: caller refuses to run rather than scoring against a number that looks calibrated.
 FRAMESHIFT_BACKGROUND_FILE = None
+
+#: Default-off (Task 8h, `--frameshift-calibration-out`). A path, or None. When it names a
+#: file, `OpportunityCounter.finalise` appends one self-identifying JSON Lines record per
+#: invocation carrying the candidate rows and the span signature table -- the only thing
+#: that generates `N` for a State that produced no support in this sample, which PLAN Task
+#: 8 Step 3's estimator needs and no other output carries. Independent of
+#: EXACT_FRAMESHIFT_CALLER: a calibration capture runs with the caller OFF so it cannot
+#: perturb the calls it measures. See advntr/frameshift_calibration.py.
+FRAMESHIFT_CALIBRATION_OUT = None
