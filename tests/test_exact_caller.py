@@ -84,16 +84,6 @@ class _ListHandler(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-class _StubBackground(object):
-    """A background with one rate, for the aggregation tests that need no artifact."""
-
-    def __init__(self, probability):
-        self.probability = probability
-
-    def probability_for(self, _state):
-        return self.probability
-
-
 def _vpath(state_names):
     return ([(0, _FakeState('start'))] +
             [(i + 1, _FakeState(name)) for i, name in enumerate(state_names)] +
@@ -198,8 +188,11 @@ class _ExactCallerTestCase(unittest.TestCase):
          settings.USE_ONLY_FULLY_COVERED_RU, settings.EXACT_FRAMESHIFT_CALLER,
          settings.FRAMESHIFT_BACKGROUND_FILE) = self.saved
 
-    def _write_background(self, document=None):
-        path = os.path.join(self.tempdir, 'background.json')
+    def _write_background(self, document=None, name='background.json'):
+        """A distinct `name` per artifact: `exact_caller` caches on the path for the
+        life of the process (see its `_LOADED`), so rewriting one path mid-test would
+        not be picked up -- deliberately, since that is the mixed-basis hazard."""
+        path = os.path.join(self.tempdir, name)
         with open(path, 'w') as handle:
             json.dump(SYNTHETIC_BACKGROUND if document is None else document, handle)
         return path
@@ -394,14 +387,20 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
 
         self.assertEqual((records['D3_2']['support'],
                           records['D3_2']['opportunities']), (DRIVER_READS, DRIVER_READS))
-        self.assertAlmostEqual(results['D3_2'][2],
-                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.0625))
+        expected = exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.0625)
+        # Relative, not `assertAlmostEqual`'s 7 absolute decimal places: this p-value is
+        # 1.5e-05 and the default would accept a clamped 0.0 for it. The `Pvalue` column
+        # is user-visible output. See `tests/test_exact_tail.py`'s `_TailTestCase`.
+        self.assertAlmostEqual(results['D3_2'][2], expected, delta=expected * 1e-9)
+        self.assertGreater(results['D3_2'][2], 0.0)
 
     def test_an_unlisted_state_scores_against_the_artifacts_default(self):
         results = self._by_state(self._run())
 
-        self.assertAlmostEqual(results['I12_suffix_LEN1'][2],
-                               exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.125))
+        expected = exact_indel_tail(DRIVER_READS, DRIVER_READS, 0.125)
+        self.assertAlmostEqual(results['I12_suffix_LEN1'][2], expected,
+                               delta=expected * 1e-9)
+        self.assertGreater(results['I12_suffix_LEN1'][2], 0.0)
 
     def test_the_state_column_and_the_coverage_column_are_untouched(self):
         """SPEC 3.5: `State` stays byte-identical and the table stays six columns. Only
@@ -419,7 +418,8 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
 
     def test_a_background_that_makes_the_observation_unremarkable_calls_nothing(self):
         settings.FRAMESHIFT_BACKGROUND_FILE = self._write_background(
-            dict(SYNTHETIC_BACKGROUND, default_probability=0.5, states={'D3_2': 0.5}))
+            dict(SYNTHETIC_BACKGROUND, default_probability=0.5, states={'D3_2': 0.5}),
+            name='unremarkable.json')
 
         self.assertIsNone(self._run())
 
@@ -443,79 +443,110 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
                          [])
 
 
-class TestSiblingAggregation(unittest.TestCase):
-    """Task 7's rows are per occurrence; the emitted `State` is per read.
+class TestTheArtifactIsReadOncePerRun(_ExactCallerTestCase):
+    def test_a_second_vntr_in_one_run_scores_against_the_same_basis(self):
+        """`advntr/genome_analyzer.py:215-216` loops over `target_vntr_ids`, so
+        `configured_background` runs once per VNTR. Re-reading there would let an
+        operator's edit land between two VNTRs of one run."""
+        settings.EXACT_FRAMESHIFT_CALLER = True
+        path = self._write_background(name='once.json')
+        settings.FRAMESHIFT_BACKGROUND_FILE = path
 
-    `k` sums across the siblings a row names in `legacy_states`; `N` does not, because
-    siblings draw on the same spans. See `advntr/exact_caller.py`'s docstring.
-    """
+        first = exact_caller.configured_background()
+        with open(path, 'w') as handle:
+            json.dump(dict(SYNTHETIC_BACKGROUND, default_probability=0.5), handle)
+        second = exact_caller.configured_background()
 
-    def test_support_sums_across_the_siblings_a_row_names(self):
-        """One read inserting in two occurrences is named `I2_1_T_LEN2` by the shipped
-        caller and `I2_1_T_LEN1` twice by the per-occurrence rebuild
-        (`advntr/frameshift_opportunities.py:per_occurrence_candidates`), so the
-        legacy-named row carries no support at all."""
-        records = {
-            'I2_1_T_LEN2': {'support': 0, 'opportunities': 2, 'legacy_states': []},
-            'I2_1_T_LEN1': {'support': 2, 'opportunities': 2,
-                            'legacy_states': ['I2_1_T_LEN2']},
-        }
+        self.assertIs(first, second)
+        self.assertEqual(second.probability_for('anything'), 0.125)
 
-        self.assertEqual(exact_caller.aggregate_evidence(records, 'I2_1_T_LEN2'), (2, 2))
+    def test_the_artifact_is_described_in_the_log_once_not_once_per_vntr(self):
+        settings.EXACT_FRAMESHIFT_CALLER = True
+        settings.FRAMESHIFT_BACKGROUND_FILE = self._write_background(name='logged.json')
 
-    def test_opportunities_take_the_largest_sibling_rather_than_the_sum(self):
-        """Two deletions in different occurrences of one read fuse into one `State`
-        (`advntr/mutation_keys.py:189`). Their spans overlap heavily, so summing the
-        denominators would count the same occurrences twice."""
-        records = {
-            'D11_2&D12_2': {'support': 0, 'opportunities': 2, 'legacy_states': []},
-            'D11_2': {'support': 1, 'opportunities': 4,
-                      'legacy_states': ['D11_2&D12_2']},
-            'D12_2': {'support': 1, 'opportunities': 3,
-                      'legacy_states': ['D11_2&D12_2']},
-        }
+        _first, messages = _capture_log(logging.INFO,
+                                        exact_caller.configured_background)
+        _second, again = _capture_log(logging.INFO,
+                                      exact_caller.configured_background)
 
-        self.assertEqual(exact_caller.aggregate_evidence(records, 'D11_2&D12_2'), (2, 4))
+        self.assertEqual(len([line for line in messages
+                              if 'SYNTHETIC FIXTURE' in line]), 1)
+        self.assertEqual([line for line in again if 'SYNTHETIC FIXTURE' in line], [])
 
-    def test_a_row_that_names_only_itself_is_its_own_evidence(self):
-        records = {'D3_1': {'support': 3, 'opportunities': 9,
-                            'legacy_states': ['D3_1']}}
 
-        self.assertEqual(exact_caller.aggregate_evidence(records, 'D3_1'), (3, 9))
+class _SilentParser(object):
+    """Stands in for the `genotype` subparser: `print_error` calls `print_help` on it and
+    then `sys.exit`s, and a real parser would write its help to the test output."""
 
-    def test_a_state_with_no_row_at_all_yields_nothing(self):
-        self.assertIsNone(exact_caller.aggregate_evidence({}, 'D3_1'))
+    def print_help(self):
+        pass
 
-    def test_an_aggregate_that_breaks_the_invariant_declines_rather_than_calls(self):
-        """`max` is a lower bound on the union of the siblings' spans, and the finalised
-        records carry counts rather than the identity sets that union needs. When the
-        summed `k` passes it, the honest answer is to refuse this candidate loudly --
-        not to clamp, and not to call on a denominator known to be too small."""
-        records = {
-            'D11_2&D12_2': {'support': 0, 'opportunities': 3, 'legacy_states': []},
-            'D11_2': {'support': 3, 'opportunities': 3,
-                      'legacy_states': ['D11_2&D12_2']},
-            'D12_2': {'support': 3, 'opportunities': 3,
-                      'legacy_states': ['D11_2&D12_2']},
-        }
 
-        (called, pvalue), messages = _capture_log(
-            logging.WARNING,
-            lambda: exact_caller.decide(records, 'D11_2&D12_2',
-                                        _StubBackground(0.001), 0.001))
+class TestTheStartupCheckDoesNotWaitForReadSelection(_ExactCallerTestCase):
+    """`find_frameshift_from_selected_reads` runs after `select_illumina_reads` has
+    decoded every read (`advntr/vntr_finder.py:977-978`), so the library-level raise is
+    a backstop. `genotype` is where "fails fast" can actually be true, and it has to
+    validate the artifact rather than merely notice that a path was given."""
 
-        self.assertFalse(called)
-        self.assertIsNone(pvalue)
-        self.assertIn('exceeds opportunities', ' '.join(messages))
+    class _Args(object):
+        #: Not a BAM, so a run that gets PAST the background check stops at the input
+        #: format -- which is how the last test tells "accepted" from "refused".
+        alignment_file = 'reads.txt'
+        fasta = None
+        nanopore = False
+        pacbio = False
+        threads = 1
+        prune_reverse = False
+        exact_frameshift_caller = True
+        frameshift_background = None
+        expansion = False
+        coverage = None
 
-    def test_a_state_with_no_row_declines_rather_than_calling(self):
-        (called, pvalue), messages = _capture_log(
-            logging.WARNING,
-            lambda: exact_caller.decide({}, 'D3_1', _StubBackground(0.001), 0.001))
+    def setUp(self):
+        _ExactCallerTestCase.setUp(self)
+        self.saved_globals = (settings.CORES, settings.MAX_ERROR_RATE,
+                              settings.PRUNE_REVERSE_DECODE)
 
-        self.assertFalse(called)
-        self.assertIsNone(pvalue)
-        self.assertIn('no opportunity row', ' '.join(messages))
+    def tearDown(self):
+        (settings.CORES, settings.MAX_ERROR_RATE,
+         settings.PRUNE_REVERSE_DECODE) = self.saved_globals
+        _ExactCallerTestCase.tearDown(self)
+
+    def _genotype_exit(self, background):
+        args = self._Args()
+        args.frameshift_background = background
+        with self.assertRaises(SystemExit) as caught:
+            advntr_commands.genotype(args, _SilentParser())
+        return str(caught.exception)
+
+    def test_a_missing_path_is_refused_at_startup(self):
+        self.assertIn('needs a frozen background model', self._genotype_exit(None))
+
+    def test_a_path_that_does_not_exist_is_refused_at_startup(self):
+        """The earlier check tested only for `None`, so a mistyped path reached
+        `find_frameshift_from_selected_reads` -- after every read had been decoded."""
+        missing = os.path.join(self.tempdir, 'no-such-background.json')
+        message = self._genotype_exit(missing)
+
+        self.assertIn(missing, message)
+        self.assertIn('not found', message)
+
+    def test_an_artifact_that_does_not_validate_is_refused_at_startup(self):
+        broken = self._write_background(dict(SYNTHETIC_BACKGROUND,
+                                             default_probability=2.0),
+                                        name='broken.json')
+        message = self._genotype_exit(broken)
+
+        self.assertIn(broken, message)
+        self.assertIn('outside the open interval', message)
+
+    def test_a_valid_artifact_gets_past_the_check(self):
+        """It must fail later, on the input file, not on the background."""
+        valid = self._write_background(name='valid-at-startup.json')
+        message = self._genotype_exit(valid)
+
+        self.assertNotIn(valid, message)
+        self.assertIn('file format is not supported', message)
 
 
 if __name__ == '__main__':

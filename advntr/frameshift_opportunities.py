@@ -74,6 +74,16 @@ out to the caller rather than left to be inferred:
   can therefore show `support >= 1` with `legacy_support == 0`. The shadow number is the
   more complete one, but Task 8 must not read the difference as an error.
 
+Every row carries the identity sets behind its two counts, not only the counts:
+`support_identities` is the deduplicated `(read, occurrence)` pairs that produced the
+candidate, and `opportunity_spans` is `(span id, count)` for every distinct span shape
+that offered it. Task 8's caller has to UNION those across sibling rows rather than sum
+or max them (SPEC line 131), and cardinalities alone cannot be unioned. Span ids stand
+in for the identities behind each denominator because spans partition the identities --
+one `(read, occurrence)` is recorded under exactly one signature -- so a union over span
+ids costs distinct shapes rather than candidates x reads. Neither field is encoded into
+the diagnostics line; see `UNENCODED_FIELDS`.
+
 The read-level rejections are read-scoped in the legacy loop (`is_valid_read = False`
 then `break`), but they are evaluated here per occurrence. That is the tightest form
 that still preserves the subset property: an occurrence that produced support must have
@@ -96,6 +106,14 @@ DIAGNOSTICS_VERSION = 1
 #: either substring would corrupt that resume count, so this prefix contains neither.
 LOG_PREFIX = 'frameshift opportunity counters (shadow, no call effect): '
 
+#: Carried on every record for Task 8's exact caller, and deliberately kept OUT of the
+#: encoded diagnostics. Two reasons, in order: the encoding is already 213 KB on
+#: example_66bf's 1014 candidates and these fields are O(observations) and O(distinct
+#: span shapes) per candidate on top of that, and they are an in-process interface for
+#: `advntr/exact_caller.py`, not a diagnostic anyone reads out of a log. They carry no
+#: read name either way -- see `anonymous_identities`.
+UNENCODED_FIELDS = ('support_identities', 'opportunity_spans')
+
 FLANK_OCCURRENCES = ('suffix_flank', 'prefix_flank')
 PARTIAL_OCCURRENCES = ('partial_start', 'partial_end')
 
@@ -116,6 +134,23 @@ def _position_of(state):
     if head[:1] in ('M', 'I', 'D') and head[1:].isdigit():
         return head[0], int(head[1:])
     return None, None
+
+
+def anonymous_identities(identities):
+    """The `(read, occurrence)` half of the observation identity, deduplicated and sorted.
+
+    Task 8's caller unions these across sibling rows (SPEC line 131: "Any future merge
+    must union read/occurrence identities; it must never sum overlapping counts"), so
+    the identities have to leave this module rather than only their cardinality.
+
+    `query_name` is dropped rather than carried. It is descriptive, not part of the key
+    -- one selected read has exactly one name, so the pair and the triple have identical
+    cardinality -- and dropping it means nothing derived from these fields can leak a
+    read name, which is the anonymity property `tests/test_frameshift_context.py:199`
+    pins for Task 5's Context column and this module's own diagnostics test pins here.
+    """
+    return tuple(sorted(set((index, occurrence)
+                            for index, _query_name, occurrence in identities)))
 
 
 def occurrence_spans(visited_states):
@@ -473,24 +508,33 @@ class OpportunityCounter(object):
         """
         legacy_support = dict(mutations)
         legacy_support.update(prefix_suffix_mutations)
-        span_counts = [(signature, len(set(identities)))
-                       for signature, identities in self._spans.items()]
+        # `self._spans` is an OrderedDict, so enumeration gives each distinct span shape
+        # a stable id within one invocation. Spans partition the identities -- each
+        # `(read, occurrence)` is recorded under exactly one signature in
+        # `observe_read` -- so unioning span ids and adding their counts is exactly
+        # unioning the identities behind them, at the cost of the distinct shapes rather
+        # than of candidates x reads.
+        span_counts = [(span_id, signature, len(set(identities)))
+                       for span_id, (signature, identities)
+                       in enumerate(self._spans.items())]
         records = OrderedDict()
         for candidate in sorted(set(legacy_support) | set(self._support)):
             components = parse_components(candidate)
-            support = len(set(self._support.get(candidate, ())))
-            opportunities = 0
+            identities = anonymous_identities(self._support.get(candidate, ()))
+            support = len(identities)
+            spans = ()
             if components is not None:
-                for signature, count in span_counts:
-                    if _signature_supports(signature, components):
-                        opportunities += count
+                spans = tuple((span_id, count) for span_id, signature, count
+                              in span_counts
+                              if _signature_supports(signature, components))
+            opportunities = sum(count for _span_id, count in spans)
             if not 0 <= support <= opportunities:
                 raise ValueError(
                     'frameshift opportunity invariant violated for candidate %s: '
                     'support %d, opportunities %d (0 <= k <= N must hold by '
                     'construction; do not clamp)' % (candidate, support, opportunities))
             records[candidate] = self._record(candidate, components, support,
-                                              opportunities,
+                                              opportunities, identities, spans,
                                               legacy_support.get(candidate, 0),
                                               ru_bp_coverage)
         if logging.getLogger().isEnabledFor(logging.INFO):
@@ -499,8 +543,14 @@ class OpportunityCounter(object):
             logging.info('%s%s', LOG_PREFIX, encode_opportunity_diagnostics(records))
         return records
 
-    def _record(self, candidate, components, support, opportunities, legacy, ru_bp_coverage):
+    def _record(self, candidate, components, support, opportunities, identities, spans,
+                legacy, ru_bp_coverage):
         """One diagnostic row: `(k, N)` beside the denominator SPEC 3.1 rejects.
+
+        `identities` and `spans` are the `(read, occurrence)` evidence behind `support`
+        and `opportunities`; `support == len(identities)` and
+        `opportunities == sum(count for _, count in spans)` hold by construction, and
+        Task 8 needs the sets rather than the counts so siblings can be unioned.
 
         `round(ru_bp_coverage / ru_length)` is carried to QUANTIFY the unit mismatch that
         PLAN Task 7 Step 3 asks about, never as a definition of `N`. `hmm_match_count` is
@@ -528,7 +578,8 @@ class OpportunityCounter(object):
                 ploidy = 1 if self._is_haploid else 2
                 average = float(total_bps) / ru_length / ploidy / copies
         return {'candidate': candidate, 'support': support,
-                'opportunities': opportunities, 'legacy_support': legacy,
+                'opportunities': opportunities, 'support_identities': identities,
+                'opportunity_spans': spans, 'legacy_support': legacy,
                 'legacy_states': sorted(self._rollup.get(candidate, ())),
                 'pattern_index': pattern_index, 'ru_bp_coverage': total_bps,
                 'ru_length': ru_length, 'ru_bp_coverage_ratio': ratio,
@@ -545,7 +596,9 @@ def encode_opportunity_diagnostics(records, version=DIAGNOSTICS_VERSION):
     catch the difference. No `query_name` appears in any field, mirroring the anonymity
     property `tests/test_frameshift_context.py:199` pins for Task 5's Context column.
     """
-    encoded = [json.dumps(record, sort_keys=True, separators=(',', ':'))
+    encoded = [json.dumps(dict((key, value) for key, value in record.items()
+                               if key not in UNENCODED_FIELDS),
+                          sort_keys=True, separators=(',', ':'))
                for record in records.values()]
     encoded.sort()
     return '{"v":%d,"candidates":[%s]}' % (version, ','.join(encoded))
