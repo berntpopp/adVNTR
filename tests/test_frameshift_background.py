@@ -169,6 +169,149 @@ class TestBackgroundArtifact(unittest.TestCase):
 
         self.assertEqual(model.probability_for('D3_1'), 0.25)
 
+    # -- Task 8i: `probability_for` is a byte-exact dict lookup with no normalisation
+    # (`advntr/frameshift_background.py:probability_for`), so a `states` key that is
+    # not byte-identical to an emitted `State` string never matches anything and
+    # silently scores that state against `default_probability`. These tests trip each
+    # rejection deliberately -- `tests/test_ratchets.py`'s model: a gate nobody has
+    # seen fail is a gate nobody knows works.
+
+    def test_a_trailing_space_key_is_refused_rather_than_silently_scored_against_default(self):
+        """The defect this task closes. Before `_validated_state_keys` existed, a
+        `states` key of `"D3_1 "` loaded without error and `probability_for('D3_1')`
+        silently returned `default_probability` -- the state was never looked up under
+        its dirty key, and nothing said so. Now the artifact is refused outright.
+
+        Asserts the precise "leading or trailing whitespace" wording rather than just
+        `'whitespace'`: the whole-key check is logically redundant with rule 4's
+        per-component check (its docstring says why it is kept anyway), so a looser
+        assertion would not notice if this half were deleted -- this is the test that
+        would."""
+        message = self._refusal(dict(VALID, states={'D3_1 ': 0.125}))
+
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('leading or trailing whitespace', message)
+
+    def test_a_leading_space_key_is_refused(self):
+        message = self._refusal(dict(VALID, states={' D3_1': 0.125}))
+
+        self.assertIn(repr(' D3_1'), message)
+        self.assertIn('leading or trailing whitespace', message)
+
+    def test_internal_whitespace_around_a_compound_separator_is_refused_rather_than_silently_scored_against_default(self):
+        """The gap fix round 1 itself left open -- `_validated_state_keys` rule 4's
+        docstring has the story and the counts. A compound key's `&`-joined
+        components must each be individually clean, not just the whole key."""
+        message = self._refusal(dict(VALID, states={'D3_1 &D4_1': 0.125}))
+
+        self.assertIn(repr('D3_1 &D4_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('whitespace', message)
+
+    def test_a_non_ascii_digit_key_is_refused_rather_than_silently_scored_against_default(self):
+        """Adversarial re-review, fix round 2: `_position_of` gates on `.isdigit()`,
+        which a Python 2 `unicode` string satisfies for non-ASCII decimal digits too.
+        `u'D\u0663_1'` (Arabic-Indic 3) parsed as position 3 and was silently ACCEPTED
+        before this fix -- an emitted `State` is always ASCII (rule 5's docstring), so
+        this could never match a lookup and would have scored against the default
+        forever."""
+        message = self._refusal(dict(VALID, states={u'D\u0663_1': 0.125}))
+
+        self.assertIn('ASCII', message)
+
+    def test_a_non_ascii_pseudo_digit_key_is_refused_not_crashed(self):
+        """`u'D\\xb2_1'` (superscript 2) also satisfies `.isdigit()` but is not one
+        `int()` accepts, so before this fix `parse_components` raised a bare
+        `ValueError` and the loader crashed instead of naming the file and the
+        problem. The ASCII check (rule 5) now runs first, so this refuses cleanly."""
+        message = self._refusal(dict(VALID, states={u'D\u00b2_1': 0.125}))
+
+        self.assertIn('ASCII', message)
+
+    def test_an_empty_states_key_is_refused(self):
+        """`''.strip() == ''`, so the whitespace rule alone cannot catch this -- it
+        needs its own rule."""
+        message = self._refusal(dict(VALID, states={'': 0.125}))
+
+        self.assertIn('empty', message)
+
+    def test_two_keys_that_collide_once_stripped_are_both_named_in_the_refusal(self):
+        """JSON does not catch this itself: `"D3_1"` and `"D3_1 "` are different raw
+        text, so both survive `json.load` as separate `states` entries -- only a
+        literally repeated key string would collapse, silently, inside `json.load`
+        before this module ever sees the dict. An artifact carrying both means the
+        calibration named the same state twice, which is refused rather than silently
+        picking one."""
+        message = self._refusal(dict(VALID, states={'D3_1': 0.1, 'D3_1 ': 0.2}))
+
+        self.assertIn(repr('D3_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn('collide', message)
+
+    def test_two_separate_collision_groups_are_both_reported_in_one_refusal(self):
+        """`_validated_state_keys` rule 2 collects every colliding group before
+        refusing, rather than raising on the first one found: a 21,000-key artifact
+        should cost one edit-and-rerun cycle for its whole set of collisions, not one
+        per group. Two unrelated pairs here must both be named in the single message
+        this call raises."""
+        message = self._refusal(dict(VALID, states={
+            'D3_1': 0.1, 'D3_1 ': 0.2, 'D4_1': 0.3, ' D4_1': 0.4,
+        }))
+
+        self.assertIn(repr('D3_1'), message)
+        self.assertIn(repr('D3_1 '), message)
+        self.assertIn(repr('D4_1'), message)
+        self.assertIn(repr(' D4_1'), message)
+
+    def test_a_key_the_shipped_grammar_cannot_produce_is_refused(self):
+        """See `_validated_state_keys` rule 5's docstring for why this rule cannot
+        refuse a legitimate key for any cohort -- the structural-closure argument, and
+        the public-corpus run that corroborates it. A key with no leading `I`/`D`
+        submodel letter is not one of the forms that argument covers."""
+        message = self._refusal(dict(VALID, states={'not_a_state': 0.125}))
+
+        self.assertIn(repr('not_a_state'), message)
+        self.assertIn('grammar', message)
+
+    def test_a_non_string_key_is_refused(self):
+        """JSON object keys are always strings -- `json.load` cannot hand
+        `_validated_state_keys` anything else, so this path is unreachable through
+        `load_background_model`'s public file-based API. Checked anyway because
+        `raw_states` is just a `dict` with no guarantee every caller came through JSON,
+        so this test calls the validator directly, the same way
+        `test_no_probability_literal_lives_in_the_module_code` reaches past the public
+        API to exercise something a JSON fixture cannot express."""
+        with self.assertRaises(BackgroundModelError) as caught:
+            frameshift_background._validated_state_keys('some/path.json', {1: 0.125})
+
+        message = str(caught.exception)
+        self.assertIn('some/path.json', message)
+        self.assertIn('not a string', message)
+
+    def test_real_emitted_state_forms_all_load_and_score_by_their_own_key(self):
+        """Guards against the new validation quietly rejecting everything. Every key
+        below is a real `State`/candidate string this fork's caller emitted on public
+        BAMs, collected via `finder.last_frameshift_evidence.keys()` for
+        `_validated_state_keys` rule 5's evidence run (that docstring has the full
+        corpus and counts): a plain deletion, an insertion with its emitted base and
+        length, the undecorated deletion flank form with no `_LEN` suffix (the shape
+        most likely to trip a naive grammar check), an insertion flank form, and a
+        multi-component deletion+insertion compound. All five must load, and each must
+        score by its own state-specific rate rather than falling back to the shared
+        default."""
+        real_states = {
+            'D3_1': 0.10,
+            'I10_1_A_LEN1': 0.11,
+            'D148_suffix': 0.12,
+            'I0_prefix_LEN1': 0.13,
+            'D10_2&I10_2_C_LEN9': 0.14,
+        }
+        model = load_background_model(self._write(dict(VALID, states=real_states)))
+
+        for state, probability in real_states.items():
+            self.assertEqual(model.probability_for(state), probability)
+        self.assertEqual(model.probability_for('I7_2_G_LEN1'), VALID['default_probability'])
+
     def test_no_probability_literal_lives_in_the_module_code(self):
         """SPEC Q-RATE: the public candidate-conditioned summaries (~1e-3, 3.0e-4,
         1.7e-4) are conditional on candidates with support >= 3 and are not plug-in
