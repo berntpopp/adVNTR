@@ -142,6 +142,24 @@ class TestBackgroundArtifact(unittest.TestCase):
     def test_states_must_be_a_mapping(self):
         self.assertIn('states', self._refusal(dict(VALID, states=[1, 2])))
 
+    def test_an_unknown_top_level_field_is_refused_rather_than_ignored(self):
+        """A misspelled `"state"` would otherwise load as a valid single-rate model and
+        score every candidate against the default -- silently, and with a `states` table
+        the operator believes is in force."""
+        document = dict(VALID, state={'D3_1': 0.125})
+        del document['states']
+        message = self._refusal(document)
+
+        self.assertIn("'state'", message)
+        self.assertIn('unknown field', message)
+
+    def test_a_boolean_version_is_refused(self):
+        """`True in (1,)` is True in Python 2, so a membership test alone accepts it and
+        the model then describes itself as `vTrue`."""
+        message = self._refusal(dict(VALID, version=True))
+
+        self.assertIn('version must be an integer', message)
+
     def test_the_states_table_may_be_omitted_entirely(self):
         """A single-rate background is a legitimate artifact; the per-state table is the
         refinement, not the requirement."""

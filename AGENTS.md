@@ -195,17 +195,30 @@ from `--frameshift-background <file>`.
 
 - **It is not usable without an artifact, by design.** There is no built-in `p0` and
   there must not be one: SPEC Q-RATE shows the public candidate-conditioned rates
-  (~1e-3, 1.7e-4) are conditional on candidates already selected at support >= 3 and are
-  not plug-in estimates for a production null. `--exact-frameshift-caller` with no
-  `--frameshift-background` is a startup error, and enabling it through `settings`
-  raises before any read is processed. Falling back to the shipped statistic would make
-  the flag a lie.
+  (3.0e-4 pooled, 1.7e-4 median) are conditional on candidates already selected at
+  support >= 3 and are not plug-in estimates for a production null. Falling back to the
+  shipped statistic would make the flag a lie. `genotype` therefore refuses at startup
+  both when `--frameshift-background` is missing and when the file it names does not
+  validate. Setting `settings.EXACT_FRAMESHIFT_CALLER` directly, bypassing the CLI,
+  raises instead at the top of `find_frameshift_from_selected_reads` -- which is *after*
+  `select_illumina_reads` has decoded every read, so that path is a backstop, not a
+  fail-fast.
 - **`State` and the six-column table are untouched.** Only the p-value moves;
   `MeanCoverage` stays the legacy quantity, so a flag-on run stays diffable against a
   flag-off one.
+- **Sibling rows are unioned, never summed.** Task 7's records are per `(read,
+  occurrence)`; the emitted `State` is per read. `advntr/exact_caller.py` unions both
+  the support identities and the opportunity spans across the rows whose `legacy_states`
+  name a `State`, per SPEC line 131 ("must never sum overlapping counts"), which also
+  makes `k <= N` structural.
 - **Not yet calibrated or measured.** The background must be frozen on a partition that
   is not the holdout, and the operating point measured once afterwards. Until that is
-  done the flag is a mechanism, not a recommendation.
+  done the flag is a mechanism, not a recommendation. Three things a calibration has to
+  condition on are written into `advntr/exact_caller.py`'s docstring rather than only
+  here: candidates reach the statistic only after the legacy support floor and the flank
+  boundary gates, so the null is for a truncated population; a compound `State`'s
+  aggregated event is "at least one component", whose null rate is not a per-slot `p0`;
+  and an aggregated `k == 0` is reported at a tail of 1.0 with a warning.
 
 ## Git and PRs
 

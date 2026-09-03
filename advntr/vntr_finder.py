@@ -201,8 +201,8 @@ class VNTRFinder:
         return repeat_order.get_repeat_unit_number(read)
 
     def find_frameshift_from_selected_reads(self, selected_reads):
-        # First, so a run configured for the default-off exact caller without a frozen
-        # background fails before any read is processed rather than after all of them.
+        # One basis for every candidate. NOT a fail-fast -- `:977-978` has already
+        # decoded every read; that is `advntr/advntr_commands.py:79-92`'s job.
         background = exact_caller.configured_background()
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}

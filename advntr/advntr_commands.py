@@ -7,6 +7,7 @@ from Bio import SeqIO
 from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.models import load_unique_vntrs_data, get_largest_id_in_database, save_reference_vntr_to_database
 from advntr.models import delete_vntr_from_database, create_vntrs_database
+from advntr import frameshift_background
 from advntr.reference_vntr import ReferenceVNTR
 from advntr.vntr_finder import VNTRFinder
 from advntr import settings
@@ -75,10 +76,20 @@ def genotype(args, genotype_parser):
     settings.PRUNE_REVERSE_DECODE = args.prune_reverse
     settings.EXACT_FRAMESHIFT_CALLER = args.exact_frameshift_caller
     settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
-    if args.exact_frameshift_caller and args.frameshift_background is None:
-        print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '
-                                     'background model: pass --frameshift-background '
-                                     '<file>. There is deliberately no built-in default.')
+    if args.exact_frameshift_caller:
+        if args.frameshift_background is None:
+            print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '
+                                         'background model: pass '
+                                         '--frameshift-background <file>. There is '
+                                         'deliberately no built-in default.')
+        # Load it here, not only where it is used: `find_frameshift_from_selected_reads`
+        # runs after `select_illumina_reads` has decoded every read
+        # (advntr/vntr_finder.py:977-978), so a path that exists but does not validate
+        # would otherwise cost a full read-selection pass before failing.
+        try:
+            frameshift_background.load_background_model(args.frameshift_background)
+        except frameshift_background.BackgroundModelError as error:
+            print_error(genotype_parser, str(error))
 
     if args.expansion and args.coverage is None:
         print_error(genotype_parser, 'Please specify the average coverage to identify the expansion')

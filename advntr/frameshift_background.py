@@ -8,10 +8,12 @@ cohort-derived constant, path, sample id or finding may enter Git in any form** 
 Global Constraints, the data rule), so this module ships a reader and a validator and no
 probability whatsoever.
 
-The temptation this deliberately refuses: SPEC Q-RATE reports ~1e-3 pooled and 1.7e-4
-median indel rates over public candidates, but those are conditional summaries of
-candidates already selected at support >= 3, so selection truncation and state
-heterogeneity make them **not** plug-in estimates for a production null. Planting one as
+The temptation this deliberately refuses: SPEC Q-RATE (SPEC line 44) reports 3.0e-4
+pooled and 1.7e-4 median indel rates over public candidates, but those are conditional
+summaries of candidates already selected at support >= 3, so selection truncation and
+state heterogeneity make them **not** plug-in estimates for a production null. (The
+1e-3 nearby in the SPEC is `INDEL_MUTATION_MIN_PVALUE`, the calling cutoff at SPEC line
+107 -- a different quantity, and not a rate at all.) Planting one as
 a default would produce a caller that looks calibrated and is not, which is worse than a
 caller that refuses to run. With no artifact supplied the exact caller does not run.
 
@@ -38,7 +40,8 @@ indel background; it illustrates the shape, nothing else:
 - `default_probability` is required: every candidate must get a `p0`, and the artifact,
   not this tree, decides what an unlisted state gets.
 - `states` is optional. A single-rate background is a legitimate artifact; the per-state
-  table is the refinement. Keys are the shipped `State` strings exactly as the six-column
+  table is the refinement -- which is why an unknown top-level field is refused rather
+  than ignored: a misspelling would silently downgrade an artifact to that fallback. Keys are the shipped `State` strings exactly as the six-column
   table prints them (SPEC 3.5 keeps those byte-identical, so they are a stable key).
 
 **Validation.** Every probability -- the default and each state -- must be a real number
@@ -54,6 +57,12 @@ import os
 
 
 SCHEMA = 'advntr.frameshift.background'
+
+#: Everything a version 1 artifact may contain. Anything else is refused rather than
+#: ignored: a misspelled `"state"` for `"states"` would otherwise load as a perfectly
+#: valid single-rate model and score every candidate against the default, which is the
+#: silent mis-scoring this module exists to prevent.
+KNOWN_FIELDS = ('schema', 'version', 'provenance', 'default_probability', 'states')
 
 #: Only version 1 exists. A reader that silently accepted an unknown version would score
 #: against fields it does not understand.
@@ -125,9 +134,18 @@ def load_background_model(path):
         _refuse(path, 'schema is %r, expected %r' % (document.get('schema'), SCHEMA))
     if 'version' not in document:
         _refuse(path, 'no version field')
+    # The type first: `True in (1,)` is True in Python 2, so a boolean version would
+    # otherwise pass the membership test and then log as `vTrue`.
+    if isinstance(document['version'], bool) or not isinstance(document['version'], int):
+        _refuse(path, 'version must be an integer, got %r' % (document['version'],))
     if document['version'] not in SUPPORTED_VERSIONS:
         _refuse(path, 'declares version %r; supported versions are %r'
                 % (document['version'], list(SUPPORTED_VERSIONS)))
+    unknown = sorted(set(document) - set(KNOWN_FIELDS))
+    if unknown:
+        _refuse(path, 'unknown field(s) %s; known fields are %s'
+                % (', '.join(repr(field) for field in unknown),
+                   ', '.join(KNOWN_FIELDS)))
     provenance = document.get('provenance')
     if not isinstance(provenance, basestring) or not provenance.strip():  # noqa: F821
         _refuse(path, 'no provenance: the artifact must record what it was calibrated '
