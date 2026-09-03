@@ -1,20 +1,20 @@
 """Task 8h: the default-off calibration sink, and the offline recompute it must support.
 
-Every test drives the real `VNTRFinder.find_frameshift_from_selected_reads` from
-synthetic vpaths -- no BAM, no HMM, no decoder -- so the sink is exercised through the
-real `finalise` hook rather than through hand-built records. The builders are duplicated
-from `tests/test_frameshift_opportunities.py:74-118` rather than imported, per that file's
-own note: neither module should constrain the other's fixtures.
+Every test drives the real `VNTRFinder.find_frameshift_from_selected_reads` from synthetic
+vpaths -- no BAM, no HMM, no decoder -- so the sink is exercised through the real
+`finalise` hook. The builders are duplicated from
+`tests/test_frameshift_opportunities.py:74-118` per that file's own note: neither module
+should constrain the other's fixtures.
 
-`TestOfflineRecompute` is the load-bearing one. It recomputes every row's `opportunities`
+`TestOfflineRecompute` is the load-bearing one: it recomputes every row's `opportunities`
 from the span table alone, with the shipped `parse_components` and `_signature_supports`,
-and asserts it equals the integer the sink stored -- which is what makes "stores
-primitives, derives nothing" checkable rather than asserted, and is the check an external
-fitter runs on every captured line.
+and asserts it equals the integer the sink stored -- the check an external fitter runs on
+every captured line.
 """
 import json
 import os
 import shutil
+import signal
 import tempfile
 import time
 import unittest
@@ -41,19 +41,6 @@ class _FakeState(object):
 
 class _FakeHMM(object):
     read_length_used_to_build_model = READ_LENGTH
-
-
-class _StubReference(object):
-    def __init__(self, vntr_id):
-        self.id = vntr_id
-
-
-class _StubFinder(object):
-    """Only the two attributes the sink reads, for tests about the append mechanics."""
-
-    def __init__(self, vntr_id=1):
-        self.reference_vntr = _StubReference(vntr_id)
-        self.hmm = _FakeHMM()
 
 
 class _SilentParser(object):
@@ -121,9 +108,12 @@ def _insertion_read(inserted_sequence, query_name, position=2):
 
 
 def _deletions_in_two_occurrences(first, second, query_name):
-    """One read whose whole-read fusion names a compound `State` its own rows do not:
+    """One read whose whole-read fusion names a compound `State` its own rows do not.
+
     `legacy_mutation_candidates` fuses adjacent deletions across occurrences
-    (`advntr/mutation_keys.py:189`). The shape the subset obligation is about.
+    (`advntr/mutation_keys.py:189`), so this read yields occurrence-scoped rows `D{first}_1`
+    and `D{second}_1` whose `state_identities` name the fused compound -- the shape the
+    subset obligation is about.
     """
     return _read([_unit({first: [('D', '')]}), _unit({second: [('D', '')]})], query_name)
 
@@ -140,8 +130,7 @@ READS = [
 
 
 def spin_until(predicate, what, timeout=60.0):
-    """Busy-wait on a file barrier, with a deadline so a broken race cannot hang the gate.
-    No `sleep`: one cheap enough to use is coarse enough to stagger the writers."""
+    """Busy-wait on a barrier, with a deadline: no `sleep` coarse enough to stagger."""
     deadline = time.time() + timeout
     while not predicate():
         if time.time() > deadline:
@@ -150,8 +139,7 @@ def spin_until(predicate, what, timeout=60.0):
 
 def denominator_from_spans(spans, state):
     """`N` for any `State`, from the span table alone -- as an external fitter must write
-    it: the shipped `parse_components` and `_signature_supports`, the six-element span
-    entries, no access to the run. A `State` with no row still gets its denominator."""
+    it: shipped helpers, six-element span entries, no access to the run."""
     components = frameshift_opportunities.parse_components(state)
     if components is None:
         return 0
@@ -275,7 +263,8 @@ class TestLineShape(_SinkFixture):
             self.assertEqual(set(candidate), expected)
 
     def test_opportunity_spans_is_the_only_field_dropped(self):
-        """2,644,839 bytes against the 59,082-byte span table that regenerates it."""
+        """2,644,839 bytes against the 59,082-byte span table that regenerates it, both
+        measured on one real `example_66bf_hg19_subset.bam` capture."""
         self.assertEqual(frameshift_calibration.EXCLUDED_FIELDS, ('opportunity_spans',))
 
     def test_a_span_entry_is_a_signature_and_a_count(self):
@@ -285,8 +274,7 @@ class TestLineShape(_SinkFixture):
         for entry in document['spans']:
             self.assertEqual(len(entry), 6)
             pattern_index, reached, inserted, saw_start, saw_end, count = entry
-            self.assertTrue(pattern_index is None
-                            or isinstance(pattern_index, basestring))
+            self.assertTrue(pattern_index is None or isinstance(pattern_index, basestring))
             self.assertIsInstance(reached, int)
             self.assertIsInstance(inserted, int)
             self.assertIsInstance(saw_start, bool)
@@ -353,9 +341,7 @@ class TestOfflineRecompute(_SinkFixture):
 class TestSubsetObligation(_SinkFixture):
     """`advntr/exact_caller.py:163-185` states the obligation and cannot meet it: `decide`
     compares two integers, so an identity credited to a `State` whose own spans never held
-    it is invisible at runtime with `N` in the tens of thousands. The consumer holding the
-    span inventory must assert the set property, and this is the first place that can.
-    """
+    it is invisible with `N` in the tens of thousands. This is the first place that can."""
 
     @staticmethod
     def _leaked(counter, records, state):
@@ -448,40 +434,30 @@ class TestAppendSemantics(_SinkFixture):
 
 
 class TestTheAppendIsNotCorruptibleByAccident(_SinkFixture):
-    """One line is 443 KB on a real capture, far above the size at which an append is
-    atomic: stdio splits it into many `write()` calls and two writers interleave. A review
-    drove eight barrier-synchronised appends into one file and got 0 of 8 lines back.
+    """A 443 KB append is not atomic: stdio splits it into many `write()` calls and two
+    writers interleave. How many of eight lines that leaves unparseable is run-dependent,
+    and `advntr/frameshift_calibration.py`'s module docstring states it once -- do not
+    quote a run of your own here.
 
     **Forking real processes is not incidental.** The thread version caught a deleted lock
     in 14 of 36 runs, 39%, green every time WITH it -- honest, but not a guard. Threads
     share one file table and one GIL, so the window with two writers inside `write()` is
     far narrower than between processes, and forked children take separate open file
-    descriptions, which is also what makes `flock` contend. After the rework: 20 of 20
-    caught with the lock deleted, 12 of 12 green with it. Each child pre-builds its line
-    BEFORE the barrier and calls `_append_line`, so the only thing racing is the critical
-    section and not milliseconds of `json.dumps`.
+    descriptions, which is also what makes `flock` contend. This form catches a removed
+    lock in 20 of 20 runs. Each child pre-builds its line BEFORE the barrier, so the only
+    thing racing is the critical section and not milliseconds of `json.dumps`.
     """
 
-    #: Big enough that stdio splits the write into many `write()` calls, which is what
-    #: makes interleaving possible at all. ~794 KB, larger than the real 443 KB line.
-    ROWS = 3000
-
-    #: Rounds of the race per run. One forked round is already lethal; three costs
-    #: little and removes the last of the flakiness in the other direction.
-    ROUNDS = 3
-    WRITERS = 8
+    #: ~794 KB per line, larger than the real 443 KB one: stdio must split the write into
+    #: several `write()` calls or there is nothing for two writers to interleave. Three
+    #: rounds because one forked round is already lethal and three costs 0.5 s.
+    ROWS, ROUNDS, WRITERS = 3000, 3, 8
 
     def _bulky_records(self, tag):
-        records = OrderedDict()
-        for index in range(self.ROWS):
-            name = 'D%d_1' % index
-            records[name] = {'candidate': name, 'support': index, 'ru_length': 1,
-                             'opportunities': index + 1, 'support_identities': (),
-                             'opportunity_spans': (), 'legacy_support': 0,
-                             'legacy_states': [tag * 20], 'state_identities': {},
-                             'pattern_index': '1', 'ru_bp_coverage': 1,
-                             'ru_bp_coverage_ratio': 1, 'avg_bp_coverage': 1.0}
-        return records
+        return OrderedDict(('D%d_1' % index,
+                            {'candidate': 'D%d_1' % index, 'support': index,
+                             'opportunities': index + 1, 'legacy_states': [tag * 200]})
+                           for index in range(self.ROWS))
 
     def _race(self, round_index, lines):
         """Fork one writer per line, release them all at once, return their exit codes."""
@@ -489,22 +465,33 @@ class TestTheAppendIsNotCorruptibleByAccident(_SinkFixture):
         ready = [os.path.join(self.directory, 'ready-%d-%d' % (round_index, index))
                  for index in range(len(lines))]
         children = []
-        for index, line in enumerate(lines):
-            pid = os.fork()
-            if pid:
-                children.append(pid)
-                continue
-            status = 1
-            try:
-                open(ready[index], 'w').close()
-                spin_until(lambda: os.path.exists(go), 'the barrier')
-                frameshift_calibration._append_line(self.path, line)
-                status = 0
-            finally:
-                # Never unwind into the parent's test run, and never flush its buffers.
-                os._exit(status)
-        spin_until(lambda: all(os.path.exists(item) for item in ready), 'every writer')
-        open(go, 'w').close()
+        try:
+            for index, line in enumerate(lines):
+                pid = os.fork()
+                if pid:
+                    children.append(pid)
+                    continue
+                status = 1
+                try:
+                    open(ready[index], 'w').close()
+                    spin_until(lambda: os.path.exists(go), 'the barrier')
+                    frameshift_calibration._append_line(self.path, line)
+                    status = 0
+                finally:
+                    # Never unwind into the parent's run, never flush its buffers.
+                    os._exit(status)
+            spin_until(lambda: all(os.path.exists(item) for item in ready), 'every writer')
+            open(go, 'w').close()
+        except Exception:
+            # A half-completed fork loop, or a barrier timeout, otherwise leaves the
+            # children already made spinning at ~100% CPU each until their own deadline.
+            for pid in children:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except OSError:                     # already gone; nothing to reap
+                    pass
+            raise
         return [os.waitpid(pid, 0)[1] for pid in children]
 
     def test_eight_forked_writers_leave_eight_parseable_lines_every_round(self):
@@ -519,9 +506,30 @@ class TestTheAppendIsNotCorruptibleByAccident(_SinkFixture):
 
             written = self._lines()
             self.assertEqual(len(written), self.WRITERS * (round_index + 1))
-            recovered = sorted(json.loads(line)['vntr_id'] for line in written)
-            self.assertEqual(recovered,
+            self.assertEqual(sorted(json.loads(row)['vntr_id'] for row in written),
                              sorted(list(range(self.WRITERS)) * (round_index + 1)))
+
+    def test_a_fork_that_fails_half_way_reaps_what_it_already_made(self):
+        """Otherwise they spin on a barrier this parent will never create, and the
+        capture controller kills an in-flight sample when load1 stays high."""
+        original, made = os.fork, []
+
+        def failing_fork():
+            if len(made) >= 2:
+                raise OSError(11, 'Resource temporarily unavailable')
+            made.append(original())
+            return made[-1]
+
+        os.fork = failing_fork
+        try:
+            self.assertRaises(OSError, self._race, 0, ['{"a":1}'] * 4)
+        finally:
+            os.fork = original
+
+        forked = [pid for pid in made if pid]
+        self.assertEqual(len(forked), 2)
+        for pid in forked:
+            self.assertRaises(OSError, os.waitpid, pid, 0)
 
     def test_the_public_writer_goes_through_the_locked_append(self):
         """The race targets `_append_line`; this stops a future write around it."""
@@ -565,8 +573,7 @@ class TestATornLineCostsOnlyItself(_SinkFixture):
 
 
 class TestKeysAreSortedEverywhere(_SinkFixture):
-    """`sort_keys=True` is the whole determinism guarantee, and until this test nothing
-    died when it was removed -- a probe that set `sort_keys=False` survived the suite."""
+    """Until this test, a probe setting `sort_keys=False` survived the whole suite."""
 
     def _assert_sorted(self, node, where):
         if isinstance(node, OrderedDict):
@@ -617,8 +624,7 @@ class TestTheStartupPreflight(_SinkFixture):
         self.assertIn('not writable', self._genotype_exit(unwritable))
 
     def test_a_writable_but_unreadable_path_is_refused_too(self):
-        """A preflight opening `a` would pass a write-only path and fail inside
-        `finalise` instead -- after the decode this check exists to save."""
+        """An `a` preflight passes a write-only path, then fails after the decode."""
         if os.geteuid() == 0:
             raise unittest.SkipTest('root ignores the read bit, so there is no such path')
         write_only = os.path.join(self.directory, 'write-only.jsonl')

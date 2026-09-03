@@ -278,10 +278,13 @@ post-change flag-on.** That is a one-BAM measurement, not a corpus claim.
   partition a line came from is unrecoverable.
 - **A shared path is a mistake the writer survives, not a supported mode.** A line is
   443 KB, far above the size at which an append is atomic: eight barrier-synchronised
-  writers into one file leave 4 of 8 lines unparseable without a lock (measured, at the
-  real line size). The append holds an exclusive `fcntl.flock` across the whole write
-  including the flush, which makes the same eight-way test come out 8 of 8 parseable with
-  every `vntr_id` recovered. `flock` is advisory and binds only writers that take it, so
+  writers into one file leave an arbitrary number of the eight lines unparseable without a
+  lock. How many varies run to run, and
+  `advntr/frameshift_calibration.py`'s module docstring states that once -- cite it rather
+  than quoting a run. The stable figure is the test's: it catches a removed lock in 20 of
+  20 runs. The append holds an exclusive `fcntl.flock` across the whole write including
+  the flush, which makes the same eight-way test come out 8 of 8 parseable with every
+  `vntr_id` recovered. `flock` is advisory and binds only writers that take it, so
   it is a guard against a mistake, not a licence to share a path. The writer also checks
   that the file ends with a newline and supplies the missing one first, so a process
   killed mid-write costs its own line and not the next good one.

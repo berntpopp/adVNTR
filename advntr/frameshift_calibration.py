@@ -92,13 +92,22 @@ identity has already been through `anonymous_identities`, which drops `query_nam
 ## One file per sample, and why the line does not name the sample
 
 **The path must be per-sample, and the writer enforces what it can.** One line is 443 KB
-on the measured capture, far above the size at which an append is atomic: an adversarial
-review drove eight barrier-synchronised appends into one file and 7 of the 8 lines came
-out unparseable. `_append_line` therefore holds an exclusive `fcntl.flock` for the whole
-write, so two adVNTR processes sharing a path serialise instead of interleaving. That is a
-guard against a mistake, not a licence. `flock` is advisory -- it binds only writers that
-take it -- so it does not survive a filesystem that ignores it or a third-party writer.
-Point each sample at its own file.
+on the measured capture, far above the size at which an append is atomic: eight
+barrier-synchronised appends into one file come back with lines that do not parse.
+
+**How many is run-dependent, and this is the only place that number is stated.** An
+unlocked concurrent append leaves an ARBITRARY number of the eight unparseable -- observed
+anywhere between 0 and 4 of 8 across runs, because how the `write()` calls interleave
+varies run to run. Anywhere else that wants the figure cites this paragraph rather than
+quoting a run of its own; three sites once carried three different counts of the same
+thing. The stable number is the regression test's, and it is the one to hold anybody to:
+`tests/test_frameshift_calibration.py` catches a removed lock in 20 of 20 runs.
+
+`_append_line` therefore holds an exclusive `fcntl.flock` for the whole write, so two
+adVNTR processes sharing a path serialise instead of interleaving. That is a guard against
+a mistake, not a licence. `flock` is advisory -- it binds only writers that take it -- so
+it does not survive a filesystem that ignores it or a third-party writer. Point each
+sample at its own file.
 
 It also never appends onto a torn line. A process killed mid-write leaves a final line
 with no terminating newline, and an append that ignored that would weld its own line onto
