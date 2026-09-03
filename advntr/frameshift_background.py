@@ -134,15 +134,10 @@ def _validated_state_keys(path, raw_states):
     this function exists to close -- and this docstring, not scattered comments, is
     where the rationale for each lives, per this repository's evidence-citing style.
 
-    1. **Not a string.** A JSON object can only ever have string keys -- `json.load`
-       raises before `load_background_model` calls this function if the document text
-       tries to write anything else -- so this branch is unreachable through the public
-       `load_background_model(path)` path. It stays in because `raw_states` is handed
-       to this function as a plain `dict` with no guarantee its caller came through
-       JSON at all; `tests/test_frameshift_background.py` demonstrates it by calling
-       this function directly with a non-string key, the same way this module's
-       existing `test_no_probability_literal_lives_in_the_module_code` reaches past the
-       public API to inspect something JSON alone cannot exercise.
+    1. **Not a string.** Unreachable through `load_background_model`'s JSON path
+       (object keys are always strings); `raw_states` is just a `dict`, so this is
+       tested by calling this function directly (as
+       `test_no_probability_literal_lives_in_the_module_code` already does for AST).
     2. **Collides with another key once stripped.** Checked before rule 3 on purpose.
        JSON itself does not catch this: two keys that differ at the raw-text level (say
        `"D3_1"` and `"D3_1 "`) both survive `json.load` as separate dict entries -- only
@@ -174,20 +169,26 @@ def _validated_state_keys(path, raw_states):
        evidence (below) are compound `A&B&...` forms. The component check iterates
        `key.split('&')` in the key's own left-to-right order, not sorted -- a `&`-joined
        key's component order is already the caller's canonical order, so nothing here
-       needs re-deriving it.
+       needs re-deriving it. The whole-key half is now logically redundant with the
+       component half (a key with no `&` splits to `[key]`, so checking that lone
+       component IS checking the whole key) -- kept anyway, checked first, solely for
+       a non-redundant message on the common non-compound case; the trailing-space
+       test below asserts that exact wording, so deleting this half fails a test.
     5. **Not a form the shipped grammar can produce.** The load-bearing argument is
        structural closure, not corpus corroboration -- the run below corroborates it, it
        is not the whole basis for it. Every `I`/`D` HMM state name this fork can ever
        produce is built by `advntr/hmm_utils.py` as `'%s%s_%s' % (kind, index,
        hmm_name)` for `kind` in `('I', 'D')` (also `'M'`, addressed below) --
-       `advntr/hmm_utils.py:368,373,376` (the prefix flank matcher) and `:435,440,443`
-       (the suffix flank matcher), where `hmm_name` is the hardcoded literal `'prefix'`
-       or `'suffix'`; `:642,646,649` (`get_repeat_matcher_enhanced_hmm`, the one
-       `advntr/frameshift_opportunities.py`'s own docstring cites as what production
-       decodes against), where `hmm_name` is `str(pattern_count)`, an incrementing
-       integer counter -- so `index` is always an integer and `hmm_name` is always
-       exactly `'prefix'`, `'suffix'`, or an integer, at every construction site, for
-       any VNTR. `advntr/vntr_finder.py:336-337`
+       `advntr/hmm_utils.py:368,373,376` (the prefix flank matcher), `:435,440,443`
+       (the suffix flank matcher), `:642,646,649` (`get_repeat_matcher_enhanced_hmm`,
+       the one `advntr/frameshift_opportunities.py`'s own docstring cites as what
+       production decodes against, `hmm_name = str(pattern_count)`), `:511,515,518`
+       (`get_constant_number_of_repeats_matcher_hmm`) and `:832,837,840`
+       (`build_reference_repeat_finder_hmm`, both `for repeat in range(copies)`,
+       `hmm_name = str(repeat)`) -- every construction site in the file, prefix and
+       suffix literal, every repeat variant an incrementing integer -- so `index` is
+       always an integer and `hmm_name` is always exactly `'prefix'`, `'suffix'`, or an
+       integer, for any VNTR. `advntr/vntr_finder.py:336-337`
        (`if not current_state.startswith('I') and not current_state.startswith('D'):
        continue`) admits only `I`/`D` states into any candidate at all, so an `M` state
        -- the one kind `parse_components` itself refuses -- structurally never reaches a
@@ -204,6 +205,18 @@ def _validated_state_keys(path, raw_states):
        (`kind in ('I', 'D')`, `len(fields) >= 2`,
        `advntr/frameshift_opportunities.py:236-250`). The rule cannot refuse a
        legitimate key for any cohort, not only the public one.
+
+       One more gap closed here (fix round 2, adversarial re-review): `_position_of`
+       gates on `.isdigit()`, which a Python 2 `unicode` string -- exactly what
+       `json.load` hands this function -- satisfies for non-ASCII decimal digits too.
+       `u'D\u0663_1'` (Arabic-Indic 3) parsed as position 3 and was silently ACCEPTED;
+       `u'D\\xb2_1'` (superscript 2) satisfies `.isdigit()` but `int()` rejects it, so
+       `parse_components` raised a bare `ValueError` instead of refusing cleanly. Both
+       characters are impossible in a real emitted `State` (the family above is ASCII
+       digits, `&`, `_` and three literal English words, nothing else), so this rule
+       now refuses any non-ASCII key before calling `parse_components` at all -- one
+       check closes both the silent-accept case and the crash case, since they are the
+       same character class.
 
        Corroboration: a run over the real caller (`advntr_harness.capture.build_finder`
        + `select_illumina_reads` + `find_frameshift_from_selected_reads`,
@@ -254,6 +267,10 @@ def _validated_state_keys(path, raw_states):
                               'so it can never byte-match an emitted State and would '
                               'silently score against default_probability instead'
                         % (key, component))
+        if any(ord(char) >= 128 for char in key):
+            _refuse(path, 'states key %r is not pure ASCII, so it can never byte-match '
+                          'an emitted State (advntr/hmm_utils.py never emits anything '
+                          'else)' % (key,))
         if parse_components(key) is None:
             _refuse(path, 'states key %r is not a form the shipped grammar can produce '
                           '(advntr/frameshift_opportunities.py:parse_components '

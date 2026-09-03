@@ -180,34 +180,53 @@ class TestBackgroundArtifact(unittest.TestCase):
         """The defect this task closes. Before `_validated_state_keys` existed, a
         `states` key of `"D3_1 "` loaded without error and `probability_for('D3_1')`
         silently returned `default_probability` -- the state was never looked up under
-        its dirty key, and nothing said so. Now the artifact is refused outright."""
+        its dirty key, and nothing said so. Now the artifact is refused outright.
+
+        Asserts the precise "leading or trailing whitespace" wording rather than just
+        `'whitespace'`: the whole-key check is logically redundant with rule 4's
+        per-component check (its docstring says why it is kept anyway), so a looser
+        assertion would not notice if this half were deleted -- this is the test that
+        would."""
         message = self._refusal(dict(VALID, states={'D3_1 ': 0.125}))
 
         self.assertIn(repr('D3_1 '), message)
-        self.assertIn('whitespace', message)
+        self.assertIn('leading or trailing whitespace', message)
 
     def test_a_leading_space_key_is_refused(self):
         message = self._refusal(dict(VALID, states={' D3_1': 0.125}))
 
         self.assertIn(repr(' D3_1'), message)
-        self.assertIn('whitespace', message)
+        self.assertIn('leading or trailing whitespace', message)
 
     def test_internal_whitespace_around_a_compound_separator_is_refused_rather_than_silently_scored_against_default(self):
-        """Fix round 1's own gap, found by adversarial review: `"D3_1 &D4_1"` has no
-        LEADING or TRAILING whitespace on the *whole* key, so the whole-key `.strip()`
-        check alone (`_validated_state_keys` rule 4, first half) let it through -- and
-        `parse_components` never validates a component's pattern-index field's
-        *contents* (rule 5), so the grammar check let it through too. The key then
-        loaded and `probability_for('D3_1&D4_1')` -- the clean form a real compound
-        candidate actually uses -- would have silently returned `default_probability`:
-        the identical failure this task exists to close, just moved one character to
-        the right of the `&`. 2,642 of the 5,500 real states this task's evidence run
-        collected are compound `A&B&...` forms, so this was not an edge case."""
+        """The gap fix round 1 itself left open -- `_validated_state_keys` rule 4's
+        docstring has the story and the counts. A compound key's `&`-joined
+        components must each be individually clean, not just the whole key."""
         message = self._refusal(dict(VALID, states={'D3_1 &D4_1': 0.125}))
 
         self.assertIn(repr('D3_1 &D4_1'), message)
         self.assertIn(repr('D3_1 '), message)
         self.assertIn('whitespace', message)
+
+    def test_a_non_ascii_digit_key_is_refused_rather_than_silently_scored_against_default(self):
+        """Adversarial re-review, fix round 2: `_position_of` gates on `.isdigit()`,
+        which a Python 2 `unicode` string satisfies for non-ASCII decimal digits too.
+        `u'D\u0663_1'` (Arabic-Indic 3) parsed as position 3 and was silently ACCEPTED
+        before this fix -- an emitted `State` is always ASCII (rule 5's docstring), so
+        this could never match a lookup and would have scored against the default
+        forever."""
+        message = self._refusal(dict(VALID, states={u'D\u0663_1': 0.125}))
+
+        self.assertIn('ASCII', message)
+
+    def test_a_non_ascii_pseudo_digit_key_is_refused_not_crashed(self):
+        """`u'D\\xb2_1'` (superscript 2) also satisfies `.isdigit()` but is not one
+        `int()` accepts, so before this fix `parse_components` raised a bare
+        `ValueError` and the loader crashed instead of naming the file and the
+        problem. The ASCII check (rule 5) now runs first, so this refuses cleanly."""
+        message = self._refusal(dict(VALID, states={u'D\u00b2_1': 0.125}))
+
+        self.assertIn('ASCII', message)
 
     def test_an_empty_states_key_is_refused(self):
         """`''.strip() == ''`, so the whitespace rule alone cannot catch this -- it
