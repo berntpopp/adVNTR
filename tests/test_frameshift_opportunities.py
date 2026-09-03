@@ -357,6 +357,67 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(self._pair(records, 'D10_1'), (1, 5))
         self.assertAlmostEqual(records['D10_1']['avg_bp_coverage'], 70 / 12.0 / 2 / 2)
 
+    def test_each_row_carries_the_identity_sets_behind_its_two_counts(self):
+        """Task 8 unions these across sibling rows (SPEC line 131), so the sets have to
+        leave this module and must agree with the cardinalities beside them."""
+        records = self._run([_deletion_read(3), _clean_read(), _clean_read('clean-2')])
+
+        for record in records.values():
+            self.assertEqual(record['support'], len(record['support_identities']))
+            self.assertEqual(record['opportunities'],
+                             sum(count for _span, count in record['opportunity_spans']))
+        self.assertEqual(self._pair(records, 'D3_1'), (1, 3))
+        self.assertEqual(records['D3_1']['support_identities'], ((0, 0),))
+
+    def test_a_span_shape_is_shared_by_the_candidates_it_offers(self):
+        """The span id, not a per-candidate copy of the identities, is what lets Task 8
+        union two siblings' denominators without double-counting an occurrence."""
+        records = self._run([_deletion_read(3), _deletion_read(4, 'other')])
+        three = dict(records['D3_1']['opportunity_spans'])
+        four = dict(records['D4_1']['opportunity_spans'])
+
+        self.assertTrue(set(three) & set(four))
+        for span_id in set(three) & set(four):
+            self.assertEqual(three[span_id], four[span_id])
+
+    def test_the_identity_fields_never_reach_the_encoded_diagnostics(self):
+        """They are an in-process interface for `advntr/exact_caller.py`, and the
+        encoding is already 213 KB on example_66bf's 1014 candidates.
+
+        The field names are written out rather than looped over
+        `UNENCODED_FIELDS`: iterating the constant makes the test vacuous the moment
+        someone empties it, which is exactly the change it exists to catch.
+        """
+        records = self._run([_deletion_read(3), _clean_read()])
+        encoded = frameshift_opportunities.encode_opportunity_diagnostics(records)
+
+        for field in ('support_identities', 'opportunity_spans'):
+            self.assertIn(field, records['D3_1'])
+            self.assertNotIn(field, encoded)
+            self.assertIn(field, frameshift_opportunities.UNENCODED_FIELDS)
+
+    def test_distinct_span_shapes_keep_distinct_ids(self):
+        """`advntr/exact_caller.py:aggregate_evidence` unions siblings on the span id, so
+        two shapes sharing an id would silently drop a whole shape's worth of trials from
+        `N` -- and `opportunities` beside them would still look right."""
+        records = self._run([_deletion_read(3), _insertion_read('TC', 'ins'),
+                             _clean_read()])
+        spans = records['D3_1']['opportunity_spans']
+
+        self.assertGreater(len(spans), 1)
+        self.assertEqual(len(set(span_id for span_id, _count in spans)), len(spans))
+        self.assertEqual(records['D3_1']['opportunities'], sum(dict(spans).values()))
+
+    def test_the_identity_sets_carry_no_read_name(self):
+        """`query_name` is descriptive, not part of the key -- one selected read has one
+        name -- so dropping it costs no resolution and keeps the anonymity property."""
+        records = self._run([_deletion_read(3, 'a-read-name'), _clean_read('another')])
+
+        self.assertNotIn('a-read-name', repr(records))
+        self.assertNotIn('another', repr(records))
+        self.assertEqual(records['D3_1']['support'],
+                         len(records['D3_1']['support_identities']))
+
     def test_diagnostics_are_deterministic_versioned_and_carry_no_query_name(self):
         reads = [_insertion_read('TC', 'shared-name'), _deletion_read(3, 'shared-name'),
                  _clean_read('shared-name')]

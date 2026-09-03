@@ -37,6 +37,17 @@ def _reference_log_tail(k, n, p0):
         return total.ln()
 
 
+class _TailTestCase(unittest.TestCase):
+    """`assertAlmostEqual` compares to 7 DECIMAL PLACES of absolute difference by
+    default, so it treats every p-value below 5e-8 as equal to zero -- including a
+    clamped `0.0`, which is exactly the output change the `Pvalue` column would carry.
+    Probability comparisons here go through `assertRelative` or through log space."""
+
+    def assertRelative(self, actual, expected, tolerance=1e-9):
+        self.assertGreater(abs(expected), 0.0, 'use assertEqual for an exact zero')
+        self.assertAlmostEqual(actual, expected, delta=abs(expected) * tolerance)
+
+
 class TestExactTailValidation(unittest.TestCase):
     def test_exact_tail_rejects_a_non_integer_trial_count(self):
         with self.assertRaises(ValueError):
@@ -87,7 +98,7 @@ class TestExactTailValidation(unittest.TestCase):
         self.assertRaises(ValueError, exact_indel_tail, 1, True, 0.001)
 
 
-class TestExactTailBoundaries(unittest.TestCase):
+class TestExactTailBoundaries(_TailTestCase):
     def test_zero_support_is_certain(self):
         """`P(K >= 0) = 1` for every `N` and every `p0`, including the degenerate ones."""
         self.assertEqual(exact_indel_tail(0, 10, 0.001), 1.0)
@@ -100,8 +111,18 @@ class TestExactTailBoundaries(unittest.TestCase):
         self.assertRaises(ValueError, exact_indel_tail, 1, 0, 0.001)
 
     def test_support_equal_to_opportunities_is_p0_to_the_power_n(self):
-        self.assertAlmostEqual(exact_indel_tail(3, 3, 0.5), 0.125)
-        self.assertAlmostEqual(exact_indel_tail(4, 4, 0.001), 1e-12)
+        self.assertRelative(exact_indel_tail(3, 3, 0.5), 0.125)
+        self.assertRelative(exact_indel_tail(4, 4, 0.001), 1e-12)
+
+    def test_a_small_but_representable_tail_is_not_reported_as_zero(self):
+        """Only a tail that underflows the double range may come back `0.0`. Clamping a
+        merely-small p-value to zero is a silent change to a user-visible column, and it
+        is invisible to `assertAlmostEqual`'s absolute default -- see `_TailTestCase`."""
+        for k, n, p0, expected in [(4, 4, 0.001, 1e-12), (3, 10, 0.001, 1.19371509902e-07),
+                                   (6, 6, 0.01, 1e-12)]:
+            value = exact_indel_tail(k, n, p0)
+            self.assertGreater(value, 0.0)
+            self.assertRelative(value, expected, tolerance=1e-6)
 
     def test_a_zero_background_makes_any_support_impossible(self):
         """A genuine zero, reported as `-inf` in log space rather than clamped."""
@@ -115,7 +136,7 @@ class TestExactTailBoundaries(unittest.TestCase):
         self.assertFalse(tail_below_cutoff(10, 10, 1.0, 0.001))
 
 
-class TestExactTailValues(unittest.TestCase):
+class TestExactTailValues(_TailTestCase):
     def test_the_tail_matches_scipy_where_scipy_is_reliable(self):
         """`P(K >= k) = sf(k - 1)`. Pinned against the shipped library at a depth it
         still represents, so the summation fallback below cannot drift unnoticed."""
@@ -138,7 +159,7 @@ class TestExactTailValues(unittest.TestCase):
         self.assertRaises(TypeError, exact_indel_tail, 3, 10, 0.001, 0.1)
 
 
-class TestDeepTail(unittest.TestCase):
+class TestDeepTail(_TailTestCase):
     """SPEC 3.1: `binom.logsf` underflows to `-inf` at deep tails in SciPy 1.2.1, and
     that must be a valid strong result, not an error and not a clamp to a tiny positive
     number."""
@@ -197,7 +218,7 @@ class TestDeepTail(unittest.TestCase):
                                exact_indel_tail_log(60, 100, 0.001), places=9)
 
 
-class TestDecisionInLogSpace(unittest.TestCase):
+class TestDecisionInLogSpace(_TailTestCase):
     def test_the_decision_is_taken_against_a_log_cutoff(self):
         self.assertTrue(tail_below_cutoff(7, 20, 0.001, 0.001))
         self.assertFalse(tail_below_cutoff(1, 20, 0.001, 0.001))
