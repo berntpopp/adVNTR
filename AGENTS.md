@@ -206,11 +206,16 @@ from `--frameshift-background <file>`.
 - **`State` and the six-column table are untouched.** Only the p-value moves;
   `MeanCoverage` stays the legacy quantity, so a flag-on run stays diffable against a
   flag-off one.
-- **Sibling rows are unioned, never summed.** Task 7's records are per `(read,
-  occurrence)`; the emitted `State` is per read. `advntr/exact_caller.py` unions both
-  the support identities and the opportunity spans across the rows whose `legacy_states`
-  name a `State`, per SPEC line 131 ("must never sum overlapping counts"), which also
-  makes `k <= N` structural.
+- **Sibling support is attributed per read, and the denominator is the scored state's
+  own.** Task 7's records are per `(read, occurrence)`; the emitted `State` is per read.
+  `advntr/exact_caller.py` unions the identities each row attributed to that `State`
+  (`state_identities`, from the fusion THAT read's own whole-read map produced), per SPEC
+  line 131 ("must never sum overlapping counts"), and takes `N` from the `State`'s own
+  row. Task 8a unioned both halves instead, which credited a state with siblings' whole
+  support (measured: `k = 300` against its own row's 11 on `example_dfc3_hg19_subset.bam`)
+  and with trials no occurrence offered it; `advntr/exact_caller.py`'s docstring records
+  that correction. `k <= N` is consequently NOT structural -- the `support >
+  opportunities` guard logs and refuses the call, and clamping is forbidden.
 - **Not yet calibrated or measured.** The background must be frozen on a partition that
   is not the holdout, and the operating point measured once afterwards. Until that is
   done the flag is a mechanism, not a recommendation. Three things a calibration has to
