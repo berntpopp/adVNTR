@@ -19,32 +19,56 @@ names, and `advntr/frameshift_opportunities.py:per_occurrence_candidates` docume
 two ways those diverge from the shipped `State`: adjacent deletions in different
 occurrences are fused by the whole-read map (`D11_2` + `D12_2` -> `D11_2&D12_2`), and an
 insertion's `_LEN` suffix is renumbered (`I2_1_T_LEN1` twice -> `I2_1_T_LEN2`). In both
-cases the legacy-named row sits at `support == 0` while its siblings carry the support,
-and each sibling's `legacy_states` field names the `State` its support belongs to.
+cases the legacy-named row sits at `support == 0` while its siblings carry the support.
 
-**Both halves are a union over `(read, occurrence)` identities.** SPEC line 131: "Any
-future merge must union read/occurrence identities; it must never sum overlapping
-counts." So:
+**The two halves are not the same kind of quantity.**
 
-- **`k`** is the size of the union of the siblings' `support_identities`.
-- **`N`** is the size of the union of the siblings' `opportunity_spans` -- the span ids
-  are unioned and their counts added, which is the identity union because spans
-  partition the identities (`advntr/frameshift_opportunities.py:finalise`).
+- **`k` is a union over identities, attributed per read.** SPEC line 131: "Any future
+  merge must union read/occurrence identities; it must never sum overlapping counts." An
+  identity belongs to the `State` that ITS OWN read's whole-read fusion produced, which
+  is what a row's `state_identities` map records
+  (`advntr/frameshift_opportunities.py:observe_read`). The `legacy_states` list beside it
+  is that map's key set -- a name index, unioned across every read behind the row, and
+  not an attribution.
+- **`N` is the scored `State`'s own row's `opportunities`.** A compound's components must
+  be satisfied by ONE occurrence -- `advntr/frameshift_opportunities.py`'s module
+  docstring, "an intersection within one occurrence and never a union" -- so a span that
+  offers a sibling's shorter component set is not a trial for the longer `State`. The own
+  row is always there at a decision site: every `State` that reaches one is a key of
+  `mutations` or `prefix_suffix_mutations`, and `finalise` iterates
+  `sorted(set(legacy_support) | set(self._support))`.
 
-That makes `k <= N` structural rather than hoped for: each sibling's support identities
-lie inside the spans that sibling matches, so the union of supports lies inside the
-union of spans. The `support > opportunities` guard below is kept as a defensive check
-against a hand-built or future record shape, not as a live decision path.
+**Task 8a's version of this paragraph was wrong, and the correction is recorded rather
+than quietly dropped.** It unioned BOTH halves, crediting a `State` with every sibling's
+entire support and with the union of the siblings' `opportunity_spans`, and argued that
+the span union was what made `k <= N` structural. Measured on the public corpus, that
+`k` gave the six-deletion state at positions 17-22 of pattern 2 on
+`example_dfc3_hg19_subset.bam` `k = 300` where 17 occurrences produced it -- the entire
+245-occurrence support of its five-deletion sibling came with it, of which 3 belong --
+and gave `I10_6_A_LEN2` on `example_6c28_hg19_subset.bam` `k = 347` where 2 occurrences
+produced it. Inflating `k` shrinks the tail and inflating `N` widens it, so the two
+errors point opposite ways; the `k` error is hundreds against tens, so the net is
+anti-conservative.
 
-The earlier `sum(k)` / `max(N)` pair was wrong in both directions and is recorded here
-so it is not reinvented. `max` is a *lower bound* on the union of the siblings' trials,
-and `sum` double-counts an occurrence two siblings share, so p-values came out too small
-in the regime the guard never saw. On the fusion example above, with two siblings, one
-shared supporting occurrence and disjoint span sets: `sum/max` gives `(k=6, N=20)` and
-`p = 3.29e-04`, a call at the shipped 1e-3 cutoff; the union gives `(k=5, N=40)` and
-`p = 4.80e-02`, not a call. That is 146x, in the anti-conservative direction -- the one
-`advntr/frameshift_opportunities.py:126-129` identifies as the wrong one to optimise
-against, since a smaller `N` at the same `k` lowers the p-value.
+**So `k <= N` is no longer structural, and must not be clamped back.** An identity
+attributed to a fused `State` can come from an occurrence that never reached every one of
+that state's reference positions -- the occurrence supports one component, and the read's
+other occurrence supplies the other, but only the intersection is a trial. The
+`support > opportunities` guard below is therefore a live path, not a defensive check: it
+logs and refuses the call, which is the safe direction, and it is deliberately the only
+handler. Clamping either number, or keeping the span union to make the arithmetic tidy,
+would put back the over-count this replaced.
+
+The earlier `sum(k)` / `max(N)` pair is recorded here so it is not reinvented: `max` is a
+*lower bound* on the siblings' trials, and `sum` double-counts an occurrence two siblings
+share. The "146x, flips the decision" figure that used to sit here came from hand-built
+records no traversal produces (it needs two siblings of one fused `State` with disjoint
+span sets, so that `max(N)` is 20 where the union is 40). Measured instead, across all
+eight public `example_*` BAMs: `sum`/`max` differs from the union Task 8a shipped on two
+states, in `N` only, by 0.60% and 0.39%, with no decision change demonstrated. The
+argument against summing `k` stands on the identity union, not on that figure --
+`tests/test_exact_caller_aggregation.py` keeps a hand-built fixture that flips a decision
+at 7.8x and says on its face that it is hand-built.
 
 **Residual, and the calibration sub-task must condition on it.** For a fused `State` the
 aggregated event is "this occurrence supported at least one component", whose null rate
@@ -111,26 +135,31 @@ def configured_background():
 
 
 def aggregate_evidence(records, state):
-    """`(k, N)` for one emitted `State`, or `None` when no row mentions it.
+    """`(k, N)` for one emitted `State`, or `None` when it has no row of its own.
 
-    Both halves union rather than sum or max; see the module docstring for the
-    measurement that settles it. `spans` is keyed on the span id, so a shape two
-    siblings both match contributes its count once.
+    `k` unions only the identities each row ATTRIBUTED to this `State`, which is why the
+    walk is over `state_identities` and not over `support_identities`; `N` is this
+    `State`'s own row's `opportunities`. See the module docstring for both rulings and
+    for what the union of the two whole fields cost when it shipped.
+
+    Every row is visited rather than only the rows whose `legacy_states` name the state,
+    because those two sets are the same one: `legacy_states` is `state_identities`' key
+    set (`advntr/frameshift_opportunities.py:_record`).
     """
-    siblings = [row for candidate, row in records.items()
-                if candidate == state or state in row.get('legacy_states', ())]
-    if not siblings:
+    own = records.get(state)
+    if own is None:
         return None
     identities = set()
-    spans = {}
-    for row in siblings:
-        identities.update(row['support_identities'])
-        spans.update(row['opportunity_spans'])
-    return len(identities), sum(spans.values())
+    for row in records.values():
+        identities.update(row['state_identities'].get(state, ()))
+    return len(identities), own['opportunities']
 
 
 def decide(records, state, background, cutoff):
-    """`(called, pvalue)` for one candidate. `pvalue` is `None` when nothing was scored."""
+    """`(called, pvalue)` for one candidate. `pvalue` is `None` when nothing was scored.
+
+    `k > N` is reachable here and is refused, never clamped: see the module docstring.
+    """
     evidence = aggregate_evidence(records, state)
     if evidence is None:
         logging.warning('exact caller: no opportunity row for %s; not called', state)
@@ -143,8 +172,9 @@ def decide(records, state, background, cutoff):
                         state)
     if support > opportunities:
         logging.warning('exact caller: aggregated support %d exceeds opportunities %d '
-                        'for %s, so the sibling denominator is a strict under-count; '
-                        'not called', support, opportunities, state)
+                        'for %s, so at least one attributed occurrence never offered '
+                        'every component of it; not called',
+                        support, opportunities, state)
         return False, None
     probability = background.probability_for(state)
     logging.info('Exact tail inputs: k=%d N=%d p0=%s' % (support, opportunities,

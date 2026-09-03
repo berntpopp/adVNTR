@@ -391,7 +391,7 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         records = self._run([_deletion_read(3), _clean_read()])
         encoded = frameshift_opportunities.encode_opportunity_diagnostics(records)
 
-        for field in ('support_identities', 'opportunity_spans'):
+        for field in ('support_identities', 'opportunity_spans', 'state_identities'):
             self.assertIn(field, records['D3_1'])
             self.assertNotIn(field, encoded)
             self.assertIn(field, frameshift_opportunities.UNENCODED_FIELDS)
@@ -489,6 +489,23 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(records['D11_2&D12_2']['legacy_states'], [])
         self.assertEqual(records['D11_2']['legacy_states'], ['D11_2&D12_2'])
         self.assertEqual(records['D12_2']['legacy_states'], ['D11_2&D12_2'])
+
+    def test_one_row_keeps_two_reads_fusions_apart_instead_of_unioning_the_names(self):
+        """`legacy_states` alone cannot say WHICH identities belong to which `State`, and
+        two reads really do disagree: the fusion is derived from the whole-read map, so
+        the read deleting 11 alone names `D11_2` where the read deleting 11 and 12 in
+        adjacent occurrences names `D11_2&D12_2` (`advntr/mutation_keys.py:189`). Task 8
+        keys `k` on this split; see `tests/test_exact_caller_aggregation.py`."""
+        vntr_finder_module.get_pattern_clusters = lambda patterns: [[patterns[0]], [patterns[1]]]
+        split = _read([_unit({11: [('D', '')]}, pattern='2'),
+                       _unit({12: [('D', '')]}, pattern='2')], 'split')
+        eleven = _read([_unit({11: [('D', '')]}, pattern='2')], 'eleven')
+        attributed = self._run([split, eleven])['D11_2']['state_identities']
+
+        self.assertEqual(sorted(attributed), ['D11_2', 'D11_2&D12_2'])
+        self.assertEqual(len(attributed['D11_2']), 1)
+        self.assertEqual(len(attributed['D11_2&D12_2']), 1)
+        self.assertFalse(set(attributed['D11_2']) & set(attributed['D11_2&D12_2']))
 
     def test_flank_support_survives_the_short_circuit_that_drops_the_legacy_count(self):
         """`advntr/vntr_finder.py:402-403` skips the whole prefix/suffix block for a read

@@ -65,8 +65,9 @@ out to the caller rather than left to be inferred:
 - **The candidate NAME can differ.** Rebuilding candidates per occurrence both un-fuses
   adjacent deletions and renumbers an insertion's `_LEN` suffix, so the legacy-named row
   can sit at `support == 0` beside the occurrence-scoped rows that carry its support.
-  Every row's `legacy_states` field names the shipped `State` strings its support belongs
-  to -- see `per_occurrence_candidates`.
+  A row's `legacy_states` field lists every shipped `State` string SOME read fused it
+  into, and `state_identities` says which of its identities went to which -- see
+  `per_occurrence_candidates` and `observe_read`.
 - **Flank support can exceed the legacy count.** `advntr/vntr_finder.py:402-403`
   short-circuits the whole prefix/suffix block for a read with no repeat-unit mutation,
   so the legacy never counts that read's flank indel; `observe_read` is called before
@@ -77,19 +78,30 @@ out to the caller rather than left to be inferred:
 Every row carries the identity sets behind its two counts, not only the counts:
 `support_identities` is the deduplicated `(read, occurrence)` pairs that produced the
 candidate, and `opportunity_spans` is `(span id, count)` for every distinct span shape
-that offered it. Task 8's caller has to UNION those across sibling rows rather than sum
-or max them (SPEC line 131), and cardinalities alone cannot be unioned. Span ids stand
-in for the identities behind each denominator because spans partition the identities --
-one `(read, occurrence)` is recorded under exactly one signature -- so a union over span
-ids costs distinct shapes rather than candidates x reads. Neither field is encoded into
-the diagnostics line; see `UNENCODED_FIELDS`.
+that offered it. Task 8's caller has to UNION identities across sibling rows rather than
+sum them (SPEC line 131), and cardinalities alone cannot be unioned. Span ids stand in
+for the identities behind each denominator because spans partition the identities -- one
+`(read, occurrence)` is recorded under exactly one signature -- so a union over span ids
+costs distinct shapes rather than candidates x reads.
+
+`state_identities` is the third such field and the one Task 8 keys `k` on: `State ->
+the subset of this row's identities THAT READ'S OWN whole-read fusion named that State`.
+The bare `legacy_states` list cannot carry that. Two reads can produce the same
+occurrence-scoped candidate and fuse it differently -- one read deleting 11 and 12 in
+adjacent occurrences fuses to `D11_2&D12_2` where a read deleting only 11 does not -- so
+a consumer reading "row R names State S" as "all of R's support belongs to S" attaches
+the whole component's support to the minority `State` permanently. Measured on
+`example_dfc3_hg19_subset.bam` before Task 8f fixed it, the six-deletion state at
+positions 17-22 of pattern 2 scored `k = 300` where 11 occurrences produced it. None of
+the three fields is encoded into the diagnostics line; see `UNENCODED_FIELDS`.
 
 The read-level rejections are read-scoped in the legacy loop (`is_valid_read = False`
 then `break`), but they are evaluated here per occurrence. That is the tightest form
 that still preserves the subset property: an occurrence that produced support must have
 passed them when the loop reached its indel, so support is always a subset of
-opportunity and `k <= N` holds by construction. A violation is therefore an
-implementation bug and raises.
+opportunity and `k <= N` holds by construction WITHIN A ROW. A violation of that is an
+implementation bug and raises. It does not extend to Task 8's aggregate across sibling
+rows, which is a different pair of numbers -- see `advntr/exact_caller.py`.
 """
 from collections import OrderedDict, defaultdict, namedtuple
 import json
@@ -111,8 +123,9 @@ LOG_PREFIX = 'frameshift opportunity counters (shadow, no call effect): '
 #: example_66bf's 1014 candidates and these fields are O(observations) and O(distinct
 #: span shapes) per candidate on top of that, and they are an in-process interface for
 #: `advntr/exact_caller.py`, not a diagnostic anyone reads out of a log. They carry no
-#: read name either way -- see `anonymous_identities`.
-UNENCODED_FIELDS = ('support_identities', 'opportunity_spans')
+#: read name either way -- see `anonymous_identities`. `legacy_states` stays encoded: it
+#: is O(states) and it is the field a reader of the log actually wants.
+UNENCODED_FIELDS = ('support_identities', 'opportunity_spans', 'state_identities')
 
 FLANK_OCCURRENCES = ('suffix_flank', 'prefix_flank')
 PARTIAL_OCCURRENCES = ('partial_start', 'partial_end')
@@ -427,11 +440,17 @@ def per_occurrence_candidates(accepted_raw_mutations):
 
     In both cases the legacy-named row ends up with `support == 0` while its
     occurrence-scoped siblings carry the support, so a consumer keying `(k, N)` off the
-    `State` column would read zero for a genuinely supported candidate. Each row's
-    `legacy_states` names the shipped `State` strings its support belongs to; the
-    whole-read reconstruction that produces them is run here on the same
+    `State` column would read zero for a genuinely supported candidate. The whole-read
+    reconstruction that names the `State` is run here on the same
     `accepted_raw_mutations`, minus the flank raws that `mutation_count_temp` never sees
     (`advntr/vntr_finder.py:320` diverts them).
+
+    **The `State` returned belongs to THIS read, and only to this read.** Both
+    divergences above are read-local -- a second read carrying only one of the two
+    deletions, or inserting in one occurrence rather than two, produces the same
+    occurrence-scoped candidate under a DIFFERENT `State`. `observe_read` therefore keeps
+    the returned names beside the identity they came with (`state_identities`) instead of
+    unioning them into a per-candidate set.
 
     Returns `occurrence -> [(candidate, contributing raw mutations, legacy State names)]`.
     """
@@ -481,12 +500,18 @@ class OpportunityCounter(object):
         self._hmm_match_count = hmm_match_count
         self._is_haploid = is_haploid
         self._support = defaultdict(list)
-        self._rollup = defaultdict(set)
+        self._attribution = defaultdict(dict)
         self._spans = OrderedDict()
 
     def observe_read(self, selected_read_index, query_name, visited_states,
                      accepted_raw_mutations, ru_state_count):
-        """Record every occurrence of one valid read, indel or no indel."""
+        """Record every occurrence of one valid read, indel or no indel.
+
+        `_attribution` is `candidate -> State -> identities`, not `candidate -> States`:
+        `per_occurrence_candidates` computes the legacy `State` from THIS read's
+        whole-read fusion, so the association is only available here, per read, and a
+        set unioned across reads loses it. See the module docstring for what that cost.
+        """
         gates = flank_ratio_gates(visited_states)
         supported = per_occurrence_candidates(accepted_raw_mutations)
         for span in occurrence_spans(visited_states):
@@ -497,7 +522,9 @@ class OpportunityCounter(object):
             for candidate, raw_mutations, legacy_states in supported.get(span.occurrence, ()):
                 for _raw in raw_mutations:
                     self._support[candidate].append(identity)
-                self._rollup[candidate].update(legacy_states)
+                attributed = self._attribution[candidate]
+                for state in legacy_states:
+                    attributed.setdefault(state, set()).add(identity)
 
     def finalise(self, mutations, prefix_suffix_mutations, ru_bp_coverage):
         """Integer `(k, N)` per candidate, with the rejected denominator beside them.
@@ -551,6 +578,13 @@ class OpportunityCounter(object):
         and `opportunities`; `support == len(identities)` and
         `opportunities == sum(count for _, count in spans)` hold by construction, and
         Task 8 needs the sets rather than the counts so siblings can be unioned.
+        `state_identities` splits `identities` by the legacy `State` each read's OWN
+        whole-read fusion produced. It is a cover of a subset, not a partition: an
+        occurrence-scoped candidate whose keys land in two different whole-read
+        candidates attributes its identity to both, and one whose keys reached no legacy
+        candidate is attributed to nothing at all -- so neither `>=` nor `<=` against
+        `support` may be assumed, and no consumer should reconstruct one field from the
+        other.
 
         `round(ru_bp_coverage / ru_length)` is carried to QUANTIFY the unit mismatch that
         PLAN Task 7 Step 3 asks about, never as a definition of `N`. `hmm_match_count` is
@@ -577,10 +611,13 @@ class OpportunityCounter(object):
                 # no ploidy divisor at all, is reproduced by the same expression.
                 ploidy = 1 if self._is_haploid else 2
                 average = float(total_bps) / ru_length / ploidy / copies
+        attributed = self._attribution.get(candidate, {})
         return {'candidate': candidate, 'support': support,
                 'opportunities': opportunities, 'support_identities': identities,
                 'opportunity_spans': spans, 'legacy_support': legacy,
-                'legacy_states': sorted(self._rollup.get(candidate, ())),
+                'legacy_states': sorted(attributed),
+                'state_identities': dict((state, anonymous_identities(observed))
+                                         for state, observed in attributed.items()),
                 'pattern_index': pattern_index, 'ru_bp_coverage': total_bps,
                 'ru_length': ru_length, 'ru_bp_coverage_ratio': ratio,
                 'avg_bp_coverage': average}
