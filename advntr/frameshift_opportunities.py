@@ -78,11 +78,13 @@ out to the caller rather than left to be inferred:
 Every row carries the identity sets behind its two counts, not only the counts:
 `support_identities` is the deduplicated `(read, occurrence)` pairs that produced the
 candidate, and `opportunity_spans` is `(span id, count)` for every distinct span shape
-that offered it. Task 8's caller has to UNION identities across sibling rows rather than
-sum them (SPEC line 131), and cardinalities alone cannot be unioned. Span ids stand in
-for the identities behind each denominator because spans partition the identities -- one
-`(read, occurrence)` is recorded under exactly one signature -- so a union over span ids
-costs distinct shapes rather than candidates x reads.
+that offered it. Task 8's caller unions ATTRIBUTED identities across sibling rows rather
+than summing them (SPEC line 131), and cardinalities alone cannot be unioned. It does NOT
+union span ids across rows any more -- `N` is one row's own -- but a denominator is still
+carried as ids rather than as the identities behind it, because spans partition the
+identities (one `(read, occurrence)` per signature) and that costs distinct shapes rather
+than reads. A consumer needing those identities -- to assert that the occurrences behind
+`k` are among the trials `N` counts -- resolves the ids against this table.
 
 `state_identities` is the third such field and the one Task 8 keys `k` on: `State ->
 the subset of this row's identities THAT READ'S OWN whole-read fusion named that State`.
@@ -152,8 +154,8 @@ def _position_of(state):
 def anonymous_identities(identities):
     """The `(read, occurrence)` half of the observation identity, deduplicated and sorted.
 
-    Task 8's caller unions these across sibling rows (SPEC line 131: "Any future merge
-    must union read/occurrence identities; it must never sum overlapping counts"), so
+    Task 8's caller unions the attributed subset of these across sibling rows (SPEC
+    line 131: "must union read/occurrence identities; never sum overlapping counts"), so
     the identities have to leave this module rather than only their cardinality.
 
     `query_name` is dropped rather than carried. It is descriptive, not part of the key
@@ -579,12 +581,10 @@ class OpportunityCounter(object):
         `opportunities == sum(count for _, count in spans)` hold by construction, and
         Task 8 needs the sets rather than the counts so siblings can be unioned.
         `state_identities` splits `identities` by the legacy `State` each read's OWN
-        whole-read fusion produced. It is a cover of a subset, not a partition: an
-        occurrence-scoped candidate whose keys land in two different whole-read
-        candidates attributes its identity to both, and one whose keys reached no legacy
-        candidate is attributed to nothing at all -- so neither `>=` nor `<=` against
-        `support` may be assumed, and no consumer should reconstruct one field from the
-        other.
+        whole-read fusion produced -- a cover of a subset, not a partition: keys landing
+        in two whole-read candidates attribute their identity to both, and keys the
+        whole-read map never emitted are attributed to nothing, so neither `>=` nor `<=`
+        against `support` holds and no consumer may rebuild one field from the other.
 
         `round(ru_bp_coverage / ru_length)` is carried to QUANTIFY the unit mismatch that
         PLAN Task 7 Step 3 asks about, never as a definition of `N`. `hmm_match_count` is

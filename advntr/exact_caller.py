@@ -63,12 +63,23 @@ The earlier `sum(k)` / `max(N)` pair is recorded here so it is not reinvented: `
 *lower bound* on the siblings' trials, and `sum` double-counts an occurrence two siblings
 share. The "146x, flips the decision" figure that used to sit here came from hand-built
 records no traversal produces (it needs two siblings of one fused `State` with disjoint
-span sets, so that `max(N)` is 20 where the union is 40). Measured instead, across all
-eight public `example_*` BAMs: `sum`/`max` differs from the union Task 8a shipped on two
-states, in `N` only, by 0.60% and 0.39%, with no decision change demonstrated. The
-argument against summing `k` stands on the identity union, not on that figure --
-`tests/test_exact_caller_aggregation.py` keeps a hand-built fixture that flips a decision
-at 7.8x and says on its face that it is hand-built.
+span sets, so that `max(N)` is 20 where the union is 40). Measured instead over all eight
+public `example_*` BAMs, against BOTH baselines, because they are different comparisons
+and only the second still exists:
+
+- **against Task 8a's union**, which this file no longer computes: `sum`/`max` differs on
+  two states, in `N` only, by 0.598% and 0.391%, with no decision change demonstrated;
+- **against what ships now**: `sum`/`max` differs in `k` on 21 states across five BAMs
+  (`6449`, `66bf`, `6c28`, `b178`, `dfc3`) and in `N` on six, worst case `k = 347`
+  against 2 (`I10_6_A_LEN2` on `6c28`). Eleven of the 21 have a legacy count at or above
+  `MIN_SUPPORTING_READ_COUNT`, so they reach a decision site.
+
+The second comparison is the one that applies, and it is far larger than the first,
+because `sum` adds per-row supports that the per-read attribution splits across several
+`State`s -- the same over-credit as Task 8a's union rather than a rounding difference.
+The argument against summing `k` therefore stands on the attribution, not on any of these
+figures; `tests/test_exact_caller_aggregation.py` keeps a hand-built fixture that flips a
+decision at 7.8x and says on its face that it is hand-built.
 
 **Residual, and the calibration sub-task must condition on it.** For a fused `State` the
 aggregated event is "this occurrence supported at least one component", whose null rate
@@ -145,6 +156,24 @@ def aggregate_evidence(records, state):
     Every row is visited rather than only the rows whose `legacy_states` name the state,
     because those two sets are the same one: `legacy_states` is `state_identities`' key
     set (`advntr/frameshift_opportunities.py:_record`).
+
+    **`k` and `N` are different trial sets, and only their CARDINALITY is guarded.** An
+    identity is attributed here because the read's whole-read fusion named this `State`,
+    which takes one component; a span is counted in `N` because it satisfies EVERY
+    component. So an identity can enter `k` while the occurrence behind it is not among
+    the trials `N` counts, and `decide`'s `support > opportunities` compares two integers
+    rather than two sets -- with `N` in the tens of thousands, a leaked identity is
+    invisible. Measured over all eight public `example_*` BAMs: 0 such identities. That
+    property is pinned in `tests/test_exact_caller_aggregation.py`, together with a
+    read-loop fixture where a leak really does pass the guard, so the gap is a fixture
+    and not a hope.
+
+    The stronger check is deliberately not made here. A row carries span IDS and not the
+    identities behind them, which is what keeps `finalise` at candidates x distinct
+    shapes instead of candidates x reads (`advntr/frameshift_opportunities.py`'s module
+    docstring), so the data a true subset test needs is not in `records` by design. A
+    calibration consumer, which reads the span signature table and therefore does have
+    those identities, MUST assert the subset property when it reconstructs these pairs.
     """
     own = records.get(state)
     if own is None:
@@ -165,7 +194,12 @@ def decide(records, state, background, cutoff):
         logging.warning('exact caller: no opportunity row for %s; not called', state)
         return False, None
     support, opportunities = evidence
-    if support == 0:
+    if support == 0 and opportunities == 0:
+        logging.warning('exact caller: %s has neither support nor opportunities: no '
+                        'occurrence satisfied every one of its components, so there is '
+                        'no trial to score at all; tail is 1.0 and it is not called',
+                        state)
+    elif support == 0:
         logging.warning('exact caller: %s has no occurrence-scoped support although the '
                         'legacy count cleared the support floor, so every supporting '
                         'occurrence was ineligible; tail is 1.0 and it is not called',

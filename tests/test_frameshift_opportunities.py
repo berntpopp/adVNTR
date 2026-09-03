@@ -370,8 +370,11 @@ class TestFrameshiftOpportunities(unittest.TestCase):
         self.assertEqual(records['D3_1']['support_identities'], ((0, 0),))
 
     def test_a_span_shape_is_shared_by_the_candidates_it_offers(self):
-        """The span id, not a per-candidate copy of the identities, is what lets Task 8
-        union two siblings' denominators without double-counting an occurrence."""
+        """Pooling identical shapes is what keeps `finalise` at candidates x distinct
+        shapes rather than candidates x reads, and it is what lets a consumer see that
+        two candidates' denominators draw on the same occurrences. Task 8 no longer
+        unions span ids across siblings -- `N` is one row's own -- but the shared id is
+        still the key it would resolve identities through."""
         records = self._run([_deletion_read(3), _deletion_read(4, 'other')])
         three = dict(records['D3_1']['opportunity_spans'])
         four = dict(records['D4_1']['opportunity_spans'])
@@ -397,9 +400,11 @@ class TestFrameshiftOpportunities(unittest.TestCase):
             self.assertIn(field, frameshift_opportunities.UNENCODED_FIELDS)
 
     def test_distinct_span_shapes_keep_distinct_ids(self):
-        """`advntr/exact_caller.py:aggregate_evidence` unions siblings on the span id, so
-        two shapes sharing an id would silently drop a whole shape's worth of trials from
-        `N` -- and `opportunities` beside them would still look right."""
+        """The id is how a consumer recovers WHICH occurrences a denominator counted --
+        the subset assertion `advntr/exact_caller.py:aggregate_evidence` defers to a
+        calibration, since the rows deliberately carry ids and not identities. Two shapes
+        sharing an id would silently merge two sets of occurrences there, and
+        `opportunities` beside them would still look right."""
         records = self._run([_deletion_read(3), _insertion_read('TC', 'ins'),
                              _clean_read()])
         spans = records['D3_1']['opportunity_spans']

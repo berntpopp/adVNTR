@@ -215,7 +215,11 @@ from `--frameshift-background <file>`.
   support (measured: `k = 300` against its own row's 11 on `example_dfc3_hg19_subset.bam`)
   and with trials no occurrence offered it; `advntr/exact_caller.py`'s docstring records
   that correction. `k <= N` is consequently NOT structural -- the `support >
-  opportunities` guard logs and refuses the call, and clamping is forbidden.
+  opportunities` guard logs and refuses the call, and clamping is forbidden. That guard
+  compares two integers, not two sets: `k`'s occurrences and `N`'s trials are different
+  sets (measured, 0 identities outside their state's own spans on all eight public BAMs),
+  so a calibration, which holds the span signature table, must assert the subset property
+  itself.
 - **Not yet calibrated or measured.** The background must be frozen on a partition that
   is not the holdout, and the operating point measured once afterwards. Until that is
   done the flag is a mechanism, not a recommendation. Three things a calibration has to

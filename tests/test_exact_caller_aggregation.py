@@ -27,6 +27,7 @@ import logging
 import unittest
 
 from advntr import exact_caller
+from advntr import frameshift_opportunities
 from advntr import settings
 from advntr.exact_tail import exact_indel_tail
 from advntr.reference_vntr import ReferenceVNTR
@@ -180,6 +181,55 @@ class TestAggregationThroughTheReadLoop(unittest.TestCase):
         self.finder.find_frameshift_from_selected_reads(reads)
         return self.finder.last_frameshift_opportunities
 
+    def _records_and_spans(self, reads):
+        """The records, plus `(read, occurrence) -> span id` taken off the live counter.
+
+        A row carries span IDS and not the identities behind them -- deliberately, see
+        `advntr/frameshift_opportunities.py`'s module docstring on cost -- so the counter
+        is the only place a subset test can get them. Spans partition the identities, so
+        one map answers it.
+        """
+        captured = []
+
+        class _Spy(frameshift_opportunities.OpportunityCounter):
+            def finalise(self, *args):
+                captured.append(list(self._spans.items()))
+                return frameshift_opportunities.OpportunityCounter.finalise(self, *args)
+
+        vntr_finder_module.OpportunityCounter = _Spy
+        try:
+            records = self._records(reads)
+        finally:
+            vntr_finder_module.OpportunityCounter = \
+                frameshift_opportunities.OpportunityCounter
+        identity_span = {}
+        for span_id, (_signature, identities) in enumerate(captured[0]):
+            for index, _query_name, occurrence in identities:
+                identity_span[(index, occurrence)] = span_id
+        return records, identity_span
+
+    @staticmethod
+    def _attributed(records, state):
+        identities = set()
+        for row in records.values():
+            identities.update(row['state_identities'].get(state, ()))
+        return identities
+
+    @staticmethod
+    def _task_8a_support(records, state):
+        """`k` as Task 8a computed it: every sibling's whole support, unioned."""
+        identities = set()
+        for candidate, row in records.items():
+            if candidate == state or state in row['legacy_states']:
+                identities.update(row['support_identities'])
+        return len(identities)
+
+    def _outside_the_denominator(self, records, identity_span, state):
+        """Attributed identities whose occurrence is not among the trials `N` counts."""
+        own = set(span_id for span_id, _count in records[state]['opportunity_spans'])
+        return [identity for identity in self._attributed(records, state)
+                if identity_span[identity] not in own]
+
     def _fusion_reads(self):
         """Three reads whose whole-read fusions disagree about `D11_2`.
 
@@ -264,20 +314,29 @@ class TestAggregationThroughTheReadLoop(unittest.TestCase):
 
     def test_the_misattributed_pair_would_be_called_and_the_attributed_one_is_not(self):
         """Both fixtures, at a rate where the difference decides. This is the direction
-        that matters: the defect inflates `k`, which shrinks the tail."""
-        background = _StubBackground(SYNTHETIC_RATE)
-        fused = self._records(self._fusion_reads())
-        called_fused, _pvalue = exact_caller.decide(fused, 'D11_2&D12_2', background,
-                                                    CUTOFF)
-        renumbered = self._records(self._renumbered_reads())
-        called_len, _pvalue = exact_caller.decide(renumbered, 'I2_1_T_LEN2', background,
-                                                 CUTOFF)
+        that matters: the defect inflates `k`, which shrinks the tail.
 
-        self.assertFalse(called_fused)
-        self.assertFalse(called_len)
-        # What the misattribution scored instead: every sibling's whole support.
-        self.assertLess(exact_indel_tail(3, 5, SYNTHETIC_RATE), CUTOFF)
-        self.assertLess(exact_indel_tail(3, 3, SYNTHETIC_RATE), CUTOFF)
+        Every number comes from the traversal -- the pair `decide` scored, the `k` Task
+        8a's whole-field union would have handed it, and both tails. A literal
+        `exact_indel_tail(3, 5, rate) < cutoff` here would assert arithmetic, and would
+        go on passing whatever the read loop produced.
+        """
+        background = _StubBackground(SYNTHETIC_RATE)
+        for reads, state in ((self._fusion_reads(), 'D11_2&D12_2'),
+                             (self._renumbered_reads(), 'I2_1_T_LEN2')):
+            records = self._records(reads)
+            support, opportunities = exact_caller.aggregate_evidence(records, state)
+            called, pvalue = exact_caller.decide(records, state, background, CUTOFF)
+            misattributed = self._task_8a_support(records, state)
+
+            self.assertFalse(called)
+            self.assertGreater(pvalue, CUTOFF)
+            self.assertAlmostEqual(pvalue, exact_indel_tail(support, opportunities,
+                                                            SYNTHETIC_RATE),
+                                   delta=pvalue * 1e-9)
+            self.assertGreater(misattributed, support)
+            self.assertLess(exact_indel_tail(misattributed, opportunities,
+                                             SYNTHETIC_RATE), CUTOFF)
 
     def test_a_traversal_can_now_produce_support_above_opportunities_and_it_declines(self):
         """`k <= N` is no longer structural, and this is the shape that breaks it.
@@ -303,13 +362,53 @@ class TestAggregationThroughTheReadLoop(unittest.TestCase):
         self.assertIsNone(pvalue)
         self.assertIn('exceeds opportunities', ' '.join(messages))
 
-    def test_every_row_still_satisfies_the_per_row_invariant(self):
-        """`finalise` raises on `k > N` per ROW and keeps doing so: the aggregate above
-        is the only place the invariant can now break."""
-        for records in (self._records(self._fusion_reads()),
-                        self._records(self._renumbered_reads())):
-            for row in records.values():
-                self.assertLessEqual(row['support'], row['opportunities'])
+    def test_no_attributed_identity_sits_outside_its_states_own_spans_here(self):
+        """The subset property `aggregate_evidence` does not enforce, pinned where it
+        holds: 0 leaked identities on all eight public `example_*` BAMs, and 0 here.
+
+        The identity count is asserted too. Without it the loop goes vacuous the moment
+        attribution stops producing anything -- which is the failure it exists to catch.
+        """
+        for reads in (self._fusion_reads(), self._renumbered_reads()):
+            records, identity_span = self._records_and_spans(reads)
+            checked = 0
+            for state in records:
+                checked += len(self._attributed(records, state))
+                self.assertEqual(
+                    self._outside_the_denominator(records, identity_span, state), [],
+                    '%s counts an occurrence its own row offers no span for' % state)
+            self.assertEqual(checked, 3)
+
+    def test_an_identity_outside_the_denominator_passes_the_cardinality_guard(self):
+        """And here is the gap, as a fixture rather than an argument.
+
+        `k` needs one component through the read's fusion; `N` counts spans satisfying
+        EVERY component. The second occurrence stops at position 11, so its identity is
+        attributed to `D11_2&D12_2` while its span is not one of that state's trials.
+        Three clean reads lift `N` to 4, so `support > opportunities` -- a comparison of
+        two integers, not of two sets -- stays silent and the pair is scored as if the
+        two sets agreed. `decide` is right to be quiet: with `N` in the tens of thousands
+        this is invisible, which is why the docstring hands the subset assertion to the
+        calibration consumer that holds the span table.
+        """
+        reads = [_read([_unit({11: [('D', '')], 12: [('D', '')]}, pattern='2'),
+                        _unit({11: [('D', '')]}, pattern='2', last=11, close=False)],
+                       'over-attributed')]
+        reads += [_read([_unit(pattern='2')], 'clean-%d' % index) for index in range(3)]
+        records, identity_span = self._records_and_spans(reads)
+        outside = self._outside_the_denominator(records, identity_span,
+                                                'D11_2&D12_2')
+
+        self.assertEqual(len(outside), 1)
+        self.assertEqual(exact_caller.aggregate_evidence(records, 'D11_2&D12_2'), (2, 4))
+        (called, pvalue), messages = _capture_log(
+            logging.WARNING,
+            lambda: exact_caller.decide(records, 'D11_2&D12_2',
+                                        _StubBackground(SYNTHETIC_RATE), CUTOFF))
+
+        self.assertIsNotNone(pvalue)
+        self.assertFalse(called)
+        self.assertNotIn('exceeds opportunities', ' '.join(messages))
 
 
 class TestTheDeclineGuards(unittest.TestCase):
@@ -357,9 +456,12 @@ class TestTheDeclineGuards(unittest.TestCase):
         7.8x, in the anti-conservative direction -- the one
         `advntr/frameshift_opportunities.py:126-129` identifies as the wrong one to
         optimise against, since a smaller `N` or a larger `k` lowers the p-value. The
-        figure is illustrative and hand-built: measured across all eight public BAMs,
-        `sum`/`max` differs from the shipped union on two states, in `N` only, by under
-        1%, with no decision change demonstrated. Task 8f's report has the numbers.
+        The figure is illustrative and hand-built, and so was the baseline it used to
+        be quoted against. Measured over all eight public BAMs against what actually
+        ships, `sum`/`max` differs in `k` on 21 states across five of them -- worst case
+        347 against 2 -- and eleven of those reach a decision site. The "two states, `N`
+        only, under 1%" figure this docstring gave was against Task 8a's union, which
+        does not ship any more. Task 8f's report carries both.
         """
         records = {
             'D11_2&D12_2': _row([], [(0, 20)]),
@@ -386,6 +488,24 @@ class TestTheDeclineGuards(unittest.TestCase):
         self.assertFalse(called)
         self.assertIsNone(pvalue)
         self.assertIn('no opportunity row', ' '.join(messages))
+
+    def test_a_row_with_no_trials_at_all_is_diagnosed_as_that_and_not_as_the_other(self):
+        """`k == 0` beside `N == 0` is a different finding from `k == 0` beside a real
+        denominator: no occurrence satisfied every component, so there was nothing to
+        score, rather than every supporting occurrence being ineligible. The two share a
+        tail of 1.0, so only the message tells them apart. No such row occurs on any of
+        the eight public BAMs -- this is about the message being right when it fires."""
+        records = {'D3_1': _row([], [], legacy_states=['D3_1'])}
+
+        (called, pvalue), messages = _capture_log(
+            logging.WARNING,
+            lambda: exact_caller.decide(records, 'D3_1', _StubBackground(0.001), CUTOFF))
+
+        self.assertFalse(called)
+        self.assertEqual(pvalue, 1.0)
+        self.assertIn('no trial to score at all', ' '.join(messages))
+        self.assertNotIn('every supporting occurrence was ineligible',
+                         ' '.join(messages))
 
     def test_zero_aggregated_support_says_so_instead_of_going_quiet(self):
         """`k == 0` has a well-defined tail -- exactly 1.0 -- so unlike the two decline
