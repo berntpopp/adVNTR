@@ -1,17 +1,16 @@
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 import logging
 import numpy
 import os
 from multiprocessing import Process, Manager, Value, Semaphore
 from random import random
-from collections import defaultdict
 
 import pysam
 from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
-from advntr import exact_caller
+from advntr import coverage_guard, exact_caller, read_selection, repeat_order, settings
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
@@ -19,9 +18,6 @@ from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candid
 from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
 from advntr.sam_utils import get_reference_genome_of_alignment_file, get_related_reads_and_read_count_in_samfile
-from advntr import read_selection
-from advntr import repeat_order
-from advntr import settings
 from advntr.utils import is_low_quality_read
 
 require_enhanced_hmm(settings.USE_ENHANCED_HMM)
@@ -56,8 +52,6 @@ class VNTRFinder:
         self.is_haploid = is_haploid
         self.reference_filename = reference_filename
         self.min_repeat_bp_to_add_read = 2
-        if len(self.reference_vntr.pattern) < 30:
-            self.min_repeat_bp_to_add_read = 2
         self.min_repeat_bp_to_count_repeats = 2
 
         self.minimum_left_flanking_size = {}
@@ -79,10 +73,7 @@ class VNTRFinder:
 
     @staticmethod
     def get_alignment_file_read_mode(alignment_file):
-        read_mode = 'r' if alignment_file.endswith('sam') else 'rb'
-        if alignment_file.endswith('cram'):
-            read_mode = 'rc'
-        return read_mode
+        return 'rc' if alignment_file.endswith('cram') else ('r' if alignment_file.endswith('sam') else 'rb')
 
     @time_usage
     def build_vntr_matcher_hmm(self, copies, flanking_region_size=100):
@@ -454,6 +445,11 @@ class VNTRFinder:
                 avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[repeat_unit_index]
                 expected_indel_transitions = 0.99 / (2 * estimated_ru_count[repeat_unit_index])
             logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
+            if coverage_guard.is_rare_unit_coverage_collapsed(
+                    avg_bp_coverage, locus_coverage, settings.MIN_RELATIVE_RU_COVERAGE):
+                logging.info('Candidate %s skipped: RU%s coverage %.2f collapsed below relative threshold' %
+                             (candidate, repeat_unit_index, avg_bp_coverage))
+                return
             if background is None:
                 seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
                     avg_bp_coverage, count, expected_indel_transitions
@@ -468,6 +464,9 @@ class VNTRFinder:
             if is_mutation:
                 logging.info(log_id + ':{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
                 frameshifts.append((candidate, count, avg_bp_coverage, pval))
+
+        locus_coverage = coverage_guard.compute_locus_coverage(
+            ru_bp_coverage, hmm_match_count, estimated_ru_count, self.is_haploid)
 
         for frameshift_candidate in sorted_mutations:
             state = frameshift_candidate[0]

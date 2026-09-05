@@ -76,3 +76,10 @@ FRAMESHIFT_BACKGROUND_FILE = None
 #: EXACT_FRAMESHIFT_CALLER: a calibration capture runs with the caller OFF so it cannot
 #: perturb the calls it measures. See advntr/frameshift_calibration.py.
 FRAMESHIFT_CALIBRATION_OUT = None
+
+#: Default None (Task 9, `--rare-unit-coverage-guard`; Tier B, AGENTS.md).
+#: When set to a float (e.g. 0.15), candidates occurring in repeat units whose
+#: coverage collapses below this fraction of locus depth are guarded against
+#: false-positive calling (SPEC Q-RARE). None disables the guard.
+MIN_RELATIVE_RU_COVERAGE = None
+

@@ -9,11 +9,18 @@ Instructions for anyone — human or agent — changing this repository.
 [FORK.md](FORK.md) first: it records the divergence point, the supported surface, and why
 there is no `upstream` remote.
 
-The supported path is exactly one command:
+The supported path is two commands:
 
+1. Genotyping:
 ```
 advntr genotype -fs -vid 25561 --alignment_file X.bam -o out.vcf \
        -m muc1.db --working_directory D -t N -aln
+```
+
+2. Background model fitting (Task 8c):
+```
+advntr fit-background --capture-root <root> --labels <manifest.json> \
+       --partition calibration --out-dir <dir> --profile <name>
 ```
 
 Everything else (`makedb`, copy-number genotyping, PacBio, plotting) still compiles and
@@ -52,6 +59,7 @@ does not mention muscle in its first line.
 | `make tier2` | Full-corpus equivalence check against `tests/golden/tier2_manifest.json` |
 | `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | What `make tier2` runs, with an explicit `--out` |
 | `advntr genotype -fs -vid 25561 ... --frameshift-calibration-out F.jsonl` | Append one calibration capture record per VNTR. Default-off; changes no call |
+| `advntr fit-background [options]` | Fit, screen, cross-validate, and emit background null model from calibration sinks |
 
 ## Layout
 
@@ -88,7 +96,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1212 |
+| `advntr/vntr_finder.py` | 1211 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |

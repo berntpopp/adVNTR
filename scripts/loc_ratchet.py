@@ -23,7 +23,8 @@ GRANDFATHERED = {
     # and adds the default-off exact caller's two call-site lines: 1232 -> 1212. The
     # three sites' differences -- repeat-unit index, count, and the third site's `ID:`
     # log prefix against the other two's `VID:` -- are parameters, not tidied away.
-    'advntr/vntr_finder.py': 1212,
+    # Task 9 wires the rare-unit coverage guard into decide_and_record: 1212 -> 1211.
+    'advntr/vntr_finder.py': 1211,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
