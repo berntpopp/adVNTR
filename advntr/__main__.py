@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import sys
 
 from advntr.advntr_commands import genotype, view_model, add_model, del_model
+from advntr import background_fit_command
 from advntr import settings
 from advntr import __version__
 
@@ -26,6 +28,7 @@ def main():
                   'Instructions: http://advntr.readthedocs.io\n' \
                   '-------------------------------------------------------\n' % __version__
     help = 'Command: genotype\tfind RU counts and mutations in VNTRs\n' \
+           '         fit-background\tfit background null model from calibration sinks\n' \
            '         viewmodel\tview existing models in database\n' \
            '         addmodel\tadd custom VNTR to the database\n' \
            '         delmodel\tremove a model from database\n'
@@ -80,6 +83,11 @@ def main():
                                           help='set this flag if the organism is haploid')
     genotype_algortihm_group.add_argument('-naive', '--naive', action='store_true', default=False,
                                           help='use naive approach for PacBio reads')
+    genotype_algortihm_group.add_argument('--rare-unit-coverage-guard', type=float, metavar='<float>',
+                                          default=None, nargs='?', const=0.15,
+                                          help='guard against false positives caused by coverage collapse on '
+                                               'rare repeat units by requiring unit coverage to reach at least '
+                                               'this fraction of locus depth (default-off; 0.15 when set)')
 
     genotype_others_group = genotype_parser.add_argument_group("Other options")
     genotype_others_group.add_argument('-h', '--help', action='help',
@@ -94,6 +102,24 @@ def main():
                                        help='prune the reverse-complement decode against the '
                                             'forward score (default-off; produces identical '
                                             'genotype calls -- see AGENTS.md Tier B)')
+    genotype_others_group.add_argument('--exact-frameshift-caller', action='store_true', default=False,
+                                       help='decide frameshifts with a one-sided exact '
+                                            'binomial over the candidate opportunity '
+                                            'count instead of the shipped statistic '
+                                            '(default-off; requires '
+                                            '--frameshift-background)')
+    genotype_others_group.add_argument('--frameshift-background', type=str, metavar='<file>', default=None,
+                                       help='frozen background model for '
+                                            '--exact-frameshift-caller; there is no '
+                                            'built-in default')
+    genotype_others_group.add_argument('--frameshift-calibration-out', type=str, metavar='<file>', default=None,
+                                       help='append one JSON Lines record per VNTR with '
+                                            'the frameshift candidate rows and the span '
+                                            'signature table behind their denominators, '
+                                            'for offline background calibration. Use '
+                                            'one file per sample: the line names the '
+                                            'VNTR, never the sample (default-off; '
+                                            'changes no call)')
     genotype_others_group.add_argument('-u', '--update', action='store_true', default=False,
                                        help='set this flag to iteratively update the model')
     genotype_others_group.add_argument('-vid', '--vntr_id', type=str, metavar='<text>', default=None,
@@ -149,9 +175,16 @@ def main():
     delmodel_other_group.add_argument('-h', '--help', action='help',
                                       help='show this help message and exit')
 
+    fit_parser = subparsers.add_parser(
+        'fit-background', usage='advntr fit-background [options]',
+        description='Fit background null model from calibration sinks')
+    background_fit_command.add_fit_background_arguments(fit_parser)
+
     args = parser.parse_args()
     if args.command == 'genotype':
         genotype(args, genotype_parser)
+    elif args.command == 'fit-background':
+        sys.exit(background_fit_command.run(args))
     elif args.command == 'viewmodel':
         view_model(args, viewmodel_parser)
     elif args.command == 'addmodel':

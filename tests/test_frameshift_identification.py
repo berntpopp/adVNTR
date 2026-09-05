@@ -10,6 +10,7 @@ unchanged and every one of them still agrees with the code -- this was API drift
 tests, not a behaviour regression.
 """
 import unittest
+import math
 
 from advntr import settings
 from advntr.reference_vntr import ReferenceVNTR
@@ -82,6 +83,16 @@ class TestFrameshiftIdentification(unittest.TestCase):
         vntr_finder = self.get_vntr_finder()
         result = vntr_finder.identify_frameshift(10.0, 20, 1 / 10.0)
         self.assertEqual(result, (0, 1.0, 0))
+
+    def test_a_call_is_not_dropped_when_both_probabilities_underflow(self):
+        """The legacy ratio underflows to 0/0 at depth and yields a nan p-value."""
+        vntr_finder = self.get_vntr_finder()
+        _err, _fs, pval = vntr_finder.identify_frameshift(
+            location_coverage=4000.0,
+            observed_indel_transitions=1600,
+            expected_indels=0.0825)
+        self.assertFalse(math.isnan(pval))
+        self.assertLess(pval, 1e-3)
 
 
 if __name__ == '__main__':

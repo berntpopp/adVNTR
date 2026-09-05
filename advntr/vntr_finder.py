@@ -1,30 +1,28 @@
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 import logging
 import numpy
 import os
 from multiprocessing import Process, Manager, Value, Semaphore
 from random import random
-from collections import defaultdict
 
-# from keras.models import Sequential, load_model
 import pysam
 from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
+from advntr import coverage_guard, exact_caller, read_selection, repeat_order, settings
+from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
+from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
+                                  extract_raw_mutations, legacy_mutation_candidates)
 from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
 from advntr.sam_utils import get_reference_genome_of_alignment_file, get_related_reads_and_read_count_in_samfile
-from advntr import read_selection
-from advntr import settings
 from advntr.utils import is_low_quality_read
 
 require_enhanced_hmm(settings.USE_ENHANCED_HMM)
 from hmm.hmm import Model
 from hmm.base import DiscreteDistribution, State
-
-# from deep_recruitment import get_embedding_of_string, input_dim
 
 
 class GenotypeResult:
@@ -45,9 +43,6 @@ class SelectedRead:
         self.is_mapped = reference_start is not None
         self.query_name = query_name
 
-    def is_mapped(self):
-        return self.is_mapped
-
 
 class VNTRFinder:
     """Find the VNTR structure of a reference VNTR in NGS data of the donor."""
@@ -57,8 +52,6 @@ class VNTRFinder:
         self.is_haploid = is_haploid
         self.reference_filename = reference_filename
         self.min_repeat_bp_to_add_read = 2
-        if len(self.reference_vntr.pattern) < 30:
-            self.min_repeat_bp_to_add_read = 2
         self.min_repeat_bp_to_count_repeats = 2
 
         self.minimum_left_flanking_size = {}
@@ -69,16 +62,18 @@ class VNTRFinder:
 
         self.is_frameshift_mode = is_frameshift_mode
         self.hmm = None
+        # All replaced each invocation. Evidence and Task 7's shadow (k, N) opportunities
+        # cover every eligible candidate; only Context is emitted, called-only, anonymous.
+        self.last_frameshift_context = {}
+        self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
 
     def get_copies_for_hmm(self, read_length):
         return int(round(float(read_length) / len(self.reference_vntr.pattern) + 0.5))
 
     @staticmethod
     def get_alignment_file_read_mode(alignment_file):
-        read_mode = 'r' if alignment_file.endswith('sam') else 'rb'
-        if alignment_file.endswith('cram'):
-            read_mode = 'rc'
-        return read_mode
+        return 'rc' if alignment_file.endswith('cram') else ('r' if alignment_file.endswith('sam') else 'rb')
 
     @time_usage
     def build_vntr_matcher_hmm(self, copies, flanking_region_size=100):
@@ -135,7 +130,6 @@ class VNTRFinder:
         queries = set(queries)
         return queries
 
-
     def is_true_read(self, read):
         read_start = read.reference_start
         reference_name = read.reference_name
@@ -158,7 +152,6 @@ class VNTRFinder:
         if min_score_to_count_read is None and matches >= 0.9 * read_length and logp > -read_length:
             return True
         return False
-
 
     def process_unmapped_read(self, sema, read_segment, hmm, recruitment_score, vntr_bp_in_unmapped_reads,
                               selected_reads, compute_reverse=True):
@@ -186,193 +179,58 @@ class VNTRFinder:
                             error_rate=settings.INDEL_ERROR_RATE):
         if observed_indel_transitions > location_coverage:
             return 0, 1.0, 0
-        from scipy.stats import binom
-        from scipy import stats
+        from scipy.stats import binom, chi2
         sequencing_error_prob = binom.pmf(observed_indel_transitions, location_coverage, error_rate)
         frameshift_prob = binom.pmf(observed_indel_transitions, location_coverage, expected_indels)
-
-        chi_square_val = -2 * numpy.log(sequencing_error_prob / frameshift_prob)
-        pval = stats.chi2.sf(chi_square_val, 1)
-
+        chi_square_val = -2 * (binom.logpmf(observed_indel_transitions, location_coverage, error_rate) -
+                               binom.logpmf(observed_indel_transitions, location_coverage, expected_indels))
+        pval = chi2.sf(chi_square_val, 1)
         return sequencing_error_prob, frameshift_prob, pval
 
     @staticmethod
-    def get_reference_repeat_order(patterns, unique_repeat_units):
-        reference_repeat_order = ['L']
-        for repeat_unit in patterns:
-            for i, unique_repeat_unit in enumerate(unique_repeat_units):
-                if repeat_unit == unique_repeat_unit:
-                    reference_repeat_order.append(str(i+1))
-        reference_repeat_order.append('R')
-
-        return reference_repeat_order
-
-    @staticmethod
     def get_repeat_unit_number(read):
-        sequence = read.sequence
-        visited_states = [state.name for idx, state in read.vpath[1:-1]]
-
-        read_as_repeat_unit_number = []
-        annotated_read = defaultdict(str)
-        unit_start_points = []
-
-        current_state = None
-        visited_repeat_index = -1
-        sequence_index = 0
-        for si, state in enumerate(visited_states):
-            if 'suffix' in state:
-                if current_state != 'L':
-                    read_as_repeat_unit_number.append('L')
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = 'L'
-            elif 'unit_end' in state:
-                if current_state is None:
-                    repeat_unit_number = state.split("_")[-1]
-                    read_as_repeat_unit_number.append(repeat_unit_number)
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = repeat_unit_number
-            elif 'unit_start' in state:
-                repeat_unit_number = state.split("_")[-1]
-                read_as_repeat_unit_number.append(repeat_unit_number)
-                unit_start_points.append(si)
-                visited_repeat_index += 1
-                current_state = repeat_unit_number
-            elif 'prefix' in state:
-                if current_state != 'R':
-                    read_as_repeat_unit_number.append('R')
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = 'R'
-            else:
-                # Starting with match states (e.g. M2_1, M3_1)
-                # Same as unit_end
-                if current_state is None:
-                    repeat_unit_number = state.split("_")[-1]
-                    read_as_repeat_unit_number.append(repeat_unit_number)
-                    unit_start_points.append(si)
-                    visited_repeat_index += 1
-                    current_state = repeat_unit_number
-
-            if state.startswith('M') or state.startswith('I'):
-                annotated_read[visited_repeat_index] += sequence[sequence_index]
-                sequence_index += 1
-
-        assert len(sequence) == sequence_index
-        return read_as_repeat_unit_number, annotated_read, unit_start_points
-
-    @staticmethod
-    def find_mutated_repeat_unit(read, reference):
-        """
-        read, reference
-        :param read_as_repeat_unit_number: string1
-        :param reference_repeat_order: string2
-        :return: the mutated repeat unit number based on local alignment
-        """
-        n = len(read)
-        m = len(reference)
-        dynamic_table = [[0] * (m + 1) for _ in range(n + 1)]
-        backtrack = [[0] * (m + 1) for _ in range(n + 1)]
-
-        # Initialize the first row and column
-        for i in range(1, n + 1):
-            dynamic_table[i][0] = 0
-
-        for j in range(1, m + 1):
-            dynamic_table[0][j] = 0
-
-        max_value = 0
-        max_cell = [0, 0]
-        for i in range(1, n + 1):
-            for j in range(1, m + 1):
-                match_score = 1 if read[i-1] == reference[j-1] else 0
-                dynamic_table[i][j] = dynamic_table[i - 1][j - 1] + match_score
-
-                if dynamic_table[i][j] >= max_value:
-                    max_value = dynamic_table[i][j]
-                    max_cell[0] = i
-                    max_cell[1] = j
-
-                if dynamic_table[i][j] == 0:
-                    backtrack[i][j] = "source"
-                else:
-                    backtrack[i][j] = "diagonal"
-
-        alignment = [[], []]
-        x = max_cell[0]
-        y = max_cell[1]
-
-        mutated_repeat_indices = []
-        mutated_repeats = []
-        correct_repeats = []
-
-        prev_score = len(read) + 1  # max + 1 (impossible to achieve this value)
-        while x != 0 and y != 0:
-            current_score = dynamic_table[x][y]
-            if prev_score == current_score:  # meaning the previous match was wrong
-                mutated_repeat_indices.append(x)
-                mutated_repeats.append(read[x])
-                correct_repeats.append(reference[y])
-            prev_score = current_score
-
-            if backtrack[x][y] == "diagonal":
-                alignment[0].insert(0, read[x - 1])
-                alignment[1].insert(0, reference[y - 1])
-                x = x - 1
-                y = y - 1
-            else:
-                x = 0
-                y = 0
-
-        match_count = dynamic_table[max_cell[0]][max_cell[1]]
-
-        if match_count == len(reference):
-            return [], [], []
-        else:
-            return mutated_repeat_indices, mutated_repeats, correct_repeats
-
-    @staticmethod
-    def get_valid_repeat_orders(repeat_orders):
-        min_observed_repeat = 2
-        valid_repeat_orders = set()
-        for size in range(min_observed_repeat, len(repeat_orders)):
-            for i in range(len(repeat_orders) - size + 1):
-                valid_repeat_orders.add(''.join(repeat_orders[i:i+size]))
-
-        return valid_repeat_orders
+        return repeat_order.get_repeat_unit_number(read)
 
     def find_frameshift_from_selected_reads(self, selected_reads):
+        # One basis for every candidate. NOT a fail-fast -- `:977-978` has already
+        # decoded every read; that is `advntr/advntr_commands.py:79-92`'s job.
+        background = exact_caller.configured_background()
+        self.last_frameshift_context = {}
+        self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
         mutations = defaultdict(int)
         prefix_suffix_mutations = defaultdict(int)
-
+        candidate_evidence = defaultdict(list)
         ru_bp_coverage = defaultdict(int)
         hmm_match_count = defaultdict(int)
-
         reference_repeat_order = []
         if self.is_frameshift_mode:
             patterns = self.reference_vntr.get_repeat_segments()
             sorted_unique_patterns = sorted(list(set(patterns)))
             pattern_clusters = [[pattern] * patterns.count(pattern) for pattern in sorted_unique_patterns]
-            reference_repeat_order = self.get_reference_repeat_order(patterns, sorted_unique_patterns)
+            reference_repeat_order = repeat_order.get_reference_repeat_order(patterns, sorted_unique_patterns)
         else:
             pattern_clusters = get_pattern_clusters(self.reference_vntr.get_repeat_segments())
-
         estimated_ru_count = defaultdict(int)
         for i in range(len(pattern_clusters)):
             estimated_ru_count[str(i + 1)] = len(pattern_clusters[i])
             hmm_match_count[str(i + 1)] = len(pattern_clusters[i][0])  # sequence length itself
-
         if self.is_frameshift_mode:
             # Build reference repeat order table once for a quick lookup
-            valid_repeat_orders_in_reference = self.get_valid_repeat_orders(reference_repeat_order)
-            max_covered_repeat = self.hmm.read_length_used_to_build_model / len(self.reference_vntr.pattern)
-
-        for read in selected_reads:
+            repeat_unit_length = len(self.reference_vntr.pattern)
+            valid_repeat_orders_in_reference = repeat_order.get_valid_repeat_orders(reference_repeat_order)
+            max_covered_repeat_ratio = float(self.hmm.read_length_used_to_build_model) / repeat_unit_length
+            if settings.USE_REF_ALIGNMENT and max_covered_repeat_ratio < 3:
+                logging.info('repeat-unit realignment is inactive: read length %s covers %.2f repeat units of '
+                             'length %s (< 3)' % (self.hmm.read_length_used_to_build_model,
+                                                  max_covered_repeat_ratio, repeat_unit_length))
+            max_covered_repeat = self.hmm.read_length_used_to_build_model / repeat_unit_length
+        reference_units = [cluster[0] for cluster in pattern_clusters]
+        opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid, self)
+        for selected_read_index, read in enumerate(selected_reads):
             if settings.USE_REF_ALIGNMENT:
                 # TODO: Read Vpath once
                 read_as_repeat_unit_number, annotated_read, unit_start_points = self.get_repeat_unit_number(read)
-
                 logging.debug("Reference repeat order: {}".format(reference_repeat_order))
                 logging.debug("Read repeat order: {}".format(read_as_repeat_unit_number))
                 # Repeat expansion check
@@ -383,7 +241,7 @@ class VNTRFinder:
                 else:
                     if ''.join(read_as_repeat_unit_number) not in valid_repeat_orders_in_reference \
                             and len(read_as_repeat_unit_number) >= 3 and max_covered_repeat >= 3:
-                        mutated_repeat_indices, mutated_repeats, correct_repeats = self.find_mutated_repeat_unit(
+                        mutated_repeat_indices, mutated_repeats, correct_repeats = repeat_order.find_mutated_repeat_unit(
                             read_as_repeat_unit_number, reference_repeat_order)
                         # TODO: Multiple not-aligned repeats?
                         # Multiple mutated cases are usually the first or last RU is wrong
@@ -398,22 +256,19 @@ class VNTRFinder:
                                                                                                correct_repeats[0]))
                                 # Get the corresponding sequence for the mutated repeat units
                                 subsequence_with_repeat_number_conflict = annotated_read[mutated_repeat_indices[0]]
-
                                 # Re-align the region with the hmm
                                 _, vpath = self.hmm.subseq_viterbi(subsequence_with_repeat_number_conflict,
                                                                    correct_repeats[0])
-
                                 # Replace the annotation of the aligned region
                                 replace_start = unit_start_points[mutated_repeat_indices[0]] + 1
                                 replace_end = unit_start_points[mutated_repeat_indices[0] + 1]
                                 read.vpath[replace_start:replace_end] = vpath
-                            # else:
-                            #    logging.debug("Don't fix the alignment")
                     else:
                         logging.debug("Matched repeat unit order except the partially mapped units")
 
             visited_states = [state.name for idx, state in read.vpath[1:-1]]
-            # Logging
+            raw_mutations = extract_raw_mutations(visited_states, read.sequence, reference_units)
+            accepted_raw_mutations = []
             logging.debug("ReadName:{}".format(read.query_name))
             logging.debug("Read:{}".format(read.sequence))
             logging.debug("VisitedStates:{}".format(visited_states))
@@ -430,7 +285,6 @@ class VNTRFinder:
 
             current_repeat = None
             is_valid_read = True
-            reason_why_rejected = ""
 
             # Keep all mutations in a read, update them only if the read is valid
             mutation_count_temp = OrderedDict()
@@ -456,6 +310,8 @@ class VNTRFinder:
                     if current_state.startswith('I') or current_state.startswith('D'):
                         prefix_suffix_mutation_count_temp[current_state] = \
                             prefix_suffix_mutation_count_temp.get(current_state, 0) + 1
+                        if i in raw_mutations:
+                            accepted_raw_mutations.append(raw_mutations[i])
                     if current_state.endswith('prefix'):
                         if current_state.startswith('M'):
                             prefix_match_count += 1
@@ -486,6 +342,8 @@ class VNTRFinder:
                                 current_state += '_' + get_emitted_basepair_from_visited_states(
                                     current_state, visited_states, read.sequence)
                             mutation_count_temp[current_state] = mutation_count_temp.get(current_state, 0) + 1
+                            if i in raw_mutations:
+                                accepted_raw_mutations.append(raw_mutations[i])
                         continue
 
                 pattern_index = current_state.split('_')[-1]
@@ -520,72 +378,25 @@ class VNTRFinder:
                                                                                     read.sequence)
 
                 mutation_count_temp[current_state] = mutation_count_temp.get(current_state, 0) + 1
+                if i in raw_mutations:
+                    accepted_raw_mutations.append(raw_mutations[i])
 
             if is_valid_read:
                 update_number_of_repeat_bp_matches_in_vpath_for_each_hmm(
                     visited_states, ru_bp_coverage, full_repeat_start, full_repeat_end
                 )
+                # Before the short-circuit below, or every clean read -- the whole
+                # zero-support inventory -- is lost. N follows read.vpath as the in-place
+                # realignment rewrite at :270 leaves it, should issue #5 enable that block.
+                opportunities.observe_read(selected_read_index, read.query_name,
+                                           visited_states, accepted_raw_mutations, ru_state_count)
                 if len(mutation_count_temp) == 0:
                     continue
-                # mutation_count_temp is the dictionary of mutations in a repeat unit
-                if len(mutation_count_temp) == 1:  # only one mutation
-                    temp_mutation, count = mutation_count_temp.popitem()
-                    if temp_mutation.startswith("I"):
-                        temp_mutation = temp_mutation + "_LEN{}".format(count)
-                    mutations[temp_mutation] += 1
-                else:
-                    sorted_temp_mutations = list(mutation_count_temp.items())
-                    prev_mutation = sorted_temp_mutations[0][0]
-                    mutation_sequence = prev_mutation
-                    if prev_mutation.startswith("I"):
-                        mutation_sequence += "_LEN{}".format(sorted_temp_mutations[0][1])
-
-                    for i in range(1, len(sorted_temp_mutations)):
-                        temp_mutation = sorted_temp_mutations[i][0]
-                        current_mutation_index = int(temp_mutation.split("_")[0][1:])
-                        current_hmm_index = int(temp_mutation.split("_")[1])
-                        prev_mutation_index = int(prev_mutation.split("_")[0][1:])
-                        prev_hmm_index = int(prev_mutation.split("_")[1])
-
-                        if temp_mutation.startswith("D"):
-                            # Case 1: D(i-1), D(i),
-                            # In this case, the deletion is connected to the previous mutation sequence and skip
-                            if (prev_mutation_index + 1 == current_mutation_index
-                                    and prev_hmm_index == current_hmm_index):
-                                # <-- FIX: handle None mutation_sequence
-                                if mutation_sequence is None:
-                                    mutation_sequence = temp_mutation
-                                else:
-                                    mutation_sequence += '&' + temp_mutation
-                            # Case 2: I/D(j), D(i), j < i-1
-                            # Rare scenario: two separated deletions in a single RU
-                            else:
-                                if mutation_sequence is not None:
-                                    mutations[mutation_sequence] += 1
-                                mutation_sequence = temp_mutation
-
-                        if temp_mutation.startswith("I"):
-                            # Case 3: D(i), I(i)
-                            if (prev_mutation_index == current_mutation_index
-                                    and prev_hmm_index == current_hmm_index):
-                                # Add the insertion and done
-                                mutation_sequence += "&{}_LEN{}".format(temp_mutation,
-                                                                        mutation_count_temp[temp_mutation])
-                                mutations[mutation_sequence] += 1
-                                mutation_sequence = None
-                            # Case 4: I/D(j), I(i), j < i-1
-                            else:
-                                if mutation_sequence is not None:
-                                    mutations[mutation_sequence] += 1
-                                mutations["{}_LEN{}".format(temp_mutation,
-                                                            mutation_count_temp[temp_mutation])] += 1
-                                mutation_sequence = None
-
-                        prev_mutation = temp_mutation
-
-                    # Last check (e.g. D1-D2)
-                    if mutation_sequence is not None:
-                        mutations[mutation_sequence] += 1
+                for candidate, legacy_keys in legacy_mutation_candidates(mutation_count_temp):
+                    mutations[candidate] += 1
+                    candidate_evidence[candidate].extend(evidence_for_candidate(
+                        selected_read_index, read.query_name, legacy_keys, accepted_raw_mutations
+                    ))
 
                 # Now handle prefix/suffix-based mutations
                 for state in prefix_suffix_mutation_count_temp.keys():
@@ -599,14 +410,64 @@ class VNTRFinder:
                                 continue
 
                     occurrence = prefix_suffix_mutation_count_temp[state]
-                    if state.startswith('I'):
-                        state += "_LEN{}".format(occurrence)
-                    prefix_suffix_mutations[state] += 1
+                    candidate = state + ("_LEN{}".format(occurrence) if state.startswith('I') else '')
+                    prefix_suffix_mutations[candidate] += 1
+                    candidate_evidence[candidate].extend(evidence_for_candidate(
+                        selected_read_index, read.query_name, (state,), accepted_raw_mutations
+                    ))
 
-        sorted_mutations = sorted(mutations.items(), key=lambda x: x[1])
+        self.last_frameshift_evidence = dict((state, tuple(evidence)) for state, evidence in candidate_evidence.items())
+        self.last_frameshift_opportunities = opportunities.finalise(mutations, prefix_suffix_mutations, ru_bp_coverage)
+        sorted_mutations = sorted(mutations.items(), key=lambda item: (item[1], item[0]))
         logging.debug('sorted mutations: %s ' % sorted_mutations)
 
         frameshifts = []
+
+        def decide_and_record(candidate, count, repeat_unit_index, log_id):
+            """The three decision sites' shared body: coverage, then the p-value, then the call.
+
+            The three differ only in which repeat-unit index they read, which count they
+            pass, and one log prefix -- `log_id` is `'VID'` at the first two sites and
+            `'ID'` at the third, preserved exactly as the third site wrote it. Note the
+            division is left-associated on purpose: `float(x) / a / b / c` is not
+            guaranteed bit-identical to `x / (a * b * c)`, and MeanCoverage is printed.
+
+            `background` is `None` unless Task 8's default-off `--exact-frameshift-caller`
+            is on, so with the flag off this is byte-for-byte the pre-Task-8 decision.
+            """
+            ru_length = hmm_match_count[repeat_unit_index]
+            total_bps_in_ru = ru_bp_coverage[repeat_unit_index]
+            logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
+            if self.is_haploid:
+                avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[repeat_unit_index]
+                expected_indel_transitions = 0.99 / estimated_ru_count[repeat_unit_index]
+            else:
+                avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[repeat_unit_index]
+                expected_indel_transitions = 0.99 / (2 * estimated_ru_count[repeat_unit_index])
+            logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
+            if coverage_guard.is_rare_unit_coverage_collapsed(
+                    avg_bp_coverage, locus_coverage, settings.MIN_RELATIVE_RU_COVERAGE):
+                logging.info('Candidate %s skipped: RU%s coverage %.2f collapsed below relative threshold' %
+                             (candidate, repeat_unit_index, avg_bp_coverage))
+                return
+            if background is None:
+                seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
+                    avg_bp_coverage, count, expected_indel_transitions
+                )
+                logging.info('Sequencing error prob: %s' % seq_err_prob)
+                logging.info('Frame-shift prob: %s' % frameshift_prob)
+                is_mutation = pval < settings.INDEL_MUTATION_MIN_PVALUE
+            else:
+                is_mutation, pval = exact_caller.decide(self.last_frameshift_opportunities, candidate,
+                                                        background, settings.INDEL_MUTATION_MIN_PVALUE)
+            logging.info('P-value: %s' % pval)
+            if is_mutation:
+                logging.info(log_id + ':{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
+                frameshifts.append((candidate, count, avg_bp_coverage, pval))
+
+        locus_coverage = coverage_guard.compute_locus_coverage(
+            ru_bp_coverage, hmm_match_count, estimated_ru_count, self.is_haploid)
+
         for frameshift_candidate in sorted_mutations:
             state = frameshift_candidate[0]
             pattern_index = state.split("_")[1] if "&" not in state else state.split("&")[0].split("_")[1]
@@ -616,27 +477,7 @@ class VNTRFinder:
                 logging.info('Skipped due to too small number of occurrence {}: {}'.format(state,
                                                                                           observed_mutation_count))
                 continue
-            ru_length = hmm_match_count[pattern_index]
-            total_bps_in_ru = ru_bp_coverage[pattern_index]
-            logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-
-            if self.is_haploid:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[pattern_index]
-                expected_indel_transitions = 0.99 / estimated_ru_count[pattern_index]
-            else:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[pattern_index]
-                expected_indel_transitions = 0.99 / (2 * estimated_ru_count[pattern_index])
-
-            logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-            seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                avg_bp_coverage, observed_mutation_count, expected_indel_transitions
-            )
-            logging.info('Sequencing error prob: %s' % seq_err_prob)
-            logging.info('Frame-shift prob: %s' % frameshift_prob)
-            logging.info('P-value: %s' % pval)
-            if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                logging.info('VID:{}, There is a mutation at {}'.format(self.reference_vntr.id, state))
-                frameshifts.append((state, observed_mutation_count, avg_bp_coverage, pval))
+            decide_and_record(state, observed_mutation_count, pattern_index, 'VID')
 
         # Check prefix/suffix boundary conditions
         repeat_segments = self.reference_vntr.get_repeat_segments()
@@ -676,28 +517,7 @@ class VNTRFinder:
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue
-                    ru_length = hmm_match_count[first_repeat_unit_index]
-                    total_bps_in_ru = ru_bp_coverage[first_repeat_unit_index]
-                    logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-                    if self.is_haploid:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[
-                            first_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / estimated_ru_count[first_repeat_unit_index]
-                    else:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / \
-                                          estimated_ru_count[first_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / (2 * estimated_ru_count[first_repeat_unit_index])
-                    logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-
-                    seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                        avg_bp_coverage, mutation_count, expected_indel_transitions
-                    )
-                    logging.info('Sequencing error prob: %s' % seq_err_prob)
-                    logging.info('Frame-shift prob: %s' % frameshift_prob)
-                    logging.info('P-value: %s' % pval)
-                    if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                        logging.info('VID:{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
-                        frameshifts.append((candidate, mutation_count, avg_bp_coverage, pval))
+                    decide_and_record(candidate, mutation_count, first_repeat_unit_index, 'VID')
 
             if 'prefix' in candidate:
                 if mutation_position <= prefix_mutation_check_boundary:  # e.g. I0 is always ok
@@ -707,29 +527,13 @@ class VNTRFinder:
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue
-                    ru_length = hmm_match_count[last_repeat_unit_index]
-                    total_bps_in_ru = ru_bp_coverage[last_repeat_unit_index]
-                    logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-                    if self.is_haploid:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[
-                            last_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / estimated_ru_count[last_repeat_unit_index]
-                    else:
-                        avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / \
-                                          estimated_ru_count[last_repeat_unit_index]
-                        expected_indel_transitions = 0.99 / (2 * estimated_ru_count[last_repeat_unit_index])
-                    logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
+                    decide_and_record(candidate, mutation_count, last_repeat_unit_index, 'ID')
 
-                    seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                        avg_bp_coverage, mutation_count, expected_indel_transitions
-                    )
-                    logging.info('Sequencing error prob: %s' % seq_err_prob)
-                    logging.info('Frame-shift prob: %s' % frameshift_prob)
-                    logging.info('P-value: %s' % pval)
-                    if pval < settings.INDEL_MUTATION_MIN_PVALUE:
-                        logging.info('ID:{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
-                        frameshifts.append((candidate, mutation_count, avg_bp_coverage, pval))
-
+        for state, _count, _coverage, _pval in frameshifts:
+            evidence = self.last_frameshift_evidence[state]
+            if not evidence:
+                raise AssertionError('called frameshift lacks context evidence: %s' % state)
+            self.last_frameshift_context[state] = encode_frameshift_context(evidence)
         return frameshifts if len(frameshifts) > 0 else None
 
     def read_flanks_repeats_with_confidence(self, vpath):
@@ -930,7 +734,6 @@ class VNTRFinder:
             if len(read) - 100 > max_length:
                 max_length = len(read) - 100
         max_copies = int(round(max_length / float(len(self.reference_vntr.pattern))))
-        # max_copies = min(max_copies, 2 * len(self.reference_vntr.get_repeat_segments()))
         vntr_matcher = self.build_vntr_matcher_hmm(max_copies)
         observed_copy_numbers = []
         for haplotype in spanning_reads:
@@ -959,7 +762,6 @@ class VNTRFinder:
         haplotypes = haplotyper.get_error_corrected_haplotypes()
         copy_numbers = []
         for haplotype in haplotypes:
-            # print('haplotype: %s' % haplotype)
             logp, vpath = vntr_matcher.viterbi(haplotype)
             rev_logp, rev_vpath = vntr_matcher.viterbi(str(Seq(haplotype).reverse_complement()))
             if logp < rev_logp:
@@ -1167,6 +969,9 @@ class VNTRFinder:
     @time_usage
     def find_frameshift_from_alignment_file(self, alignment_file, unmapped_filtered_reads):
         logging.debug('finding frameshift from alignment file for %s' % self.reference_vntr.id)
+        self.last_frameshift_context = {}
+        self.last_frameshift_evidence = {}
+        self.last_frameshift_opportunities = {}
 
         selected_reads = self.select_illumina_reads(alignment_file, unmapped_filtered_reads)
         return self.find_frameshift_from_selected_reads(selected_reads)

@@ -32,6 +32,10 @@ adVNTR-Filtering
 
 # Planning artifacts (docs/ is the published Sphinx site)
 .planning/
+# Superpowers scratch / SDD ledgers live outside repository content.
+.superpowers/
+# Isolated feature worktrees
+.worktrees/
 # Harness scratch output
 tests/golden/*.actual
 tests/golden/*.actual.gz

@@ -9,11 +9,18 @@ Instructions for anyone — human or agent — changing this repository.
 [FORK.md](FORK.md) first: it records the divergence point, the supported surface, and why
 there is no `upstream` remote.
 
-The supported path is exactly one command:
+The supported path is two commands:
 
+1. Genotyping:
 ```
 advntr genotype -fs -vid 25561 --alignment_file X.bam -o out.vcf \
        -m muc1.db --working_directory D -t N -aln
+```
+
+2. Background model fitting (Task 8c):
+```
+advntr fit-background --capture-root <root> --labels <manifest.json> \
+       --partition calibration --out-dir <dir> --profile <name>
 ```
 
 Everything else (`makedb`, copy-number genotyping, PacBio, plotting) still compiles and
@@ -51,6 +58,8 @@ does not mention muscle in its first line.
 | `python -m advntr_harness.capture --tier 1 --out tests/golden` | Re-capture Tier 1 fixtures |
 | `make tier2` | Full-corpus equivalence check against `tests/golden/tier2_manifest.json` |
 | `python -m advntr_harness.capture --tier 2 --out /tmp/c --verify tests/golden` | What `make tier2` runs, with an explicit `--out` |
+| `advntr genotype -fs -vid 25561 ... --frameshift-calibration-out F.jsonl` | Append one calibration capture record per VNTR. Default-off; changes no call |
+| `advntr fit-background [options]` | Fit, screen, cross-validate, and emit background null model from calibration sinks |
 
 ## Layout
 
@@ -87,7 +96,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1406 |
+| `advntr/vntr_finder.py` | 1211 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -183,6 +192,136 @@ way can only prune paths that could never have won.
   speedup matters. Turning it on by default is a separate decision that has not been
   taken -- it stays opt-in.
 
+### `--exact-frameshift-caller`: a Tier B flag that cannot run unconfigured
+
+The second Tier B flag (Task 8; `advntr/settings.py` `EXACT_FRAMESHIFT_CALLER`, default
+`False`, written from `args.exact_frameshift_caller` at `advntr/advntr_commands.py:76`).
+With it off, the decision is the shipped `identify_frameshift`
+(`advntr/vntr_finder.py:187-197`) and the path is byte-for-byte the pre-Task-8 one. With
+it on, `advntr/exact_caller.py` decides with a one-sided exact binomial
+(`advntr/exact_tail.py`) over Task 7's integer `(k, N)` and a frozen background loaded
+from `--frameshift-background <file>`.
+
+- **It is not usable without an artifact, by design.** There is no built-in `p0` and
+  there must not be one: SPEC Q-RATE shows the public candidate-conditioned rates
+  (3.0e-4 pooled, 1.7e-4 median) are conditional on candidates already selected at
+  support >= 3 and are not plug-in estimates for a production null. Falling back to the
+  shipped statistic would make the flag a lie. `genotype` therefore refuses at startup
+  both when `--frameshift-background` is missing and when the file it names does not
+  validate. Setting `settings.EXACT_FRAMESHIFT_CALLER` directly, bypassing the CLI,
+  raises instead at the top of `find_frameshift_from_selected_reads` -- which is *after*
+  `select_illumina_reads` has decoded every read, so that path is a backstop, not a
+  fail-fast.
+- **`State` and the six-column table are untouched.** Only the p-value moves;
+  `MeanCoverage` stays the legacy quantity, so a flag-on run stays diffable against a
+  flag-off one.
+- **Sibling support is attributed per read, and the denominator is the scored state's
+  own.** Task 7's records are per `(read, occurrence)`; the emitted `State` is per read.
+  `advntr/exact_caller.py` unions the identities each row attributed to that `State`
+  (`state_identities`, from the fusion THAT read's own whole-read map produced), per SPEC
+  line 131 ("must never sum overlapping counts"), and takes `N` from the `State`'s own
+  row. Task 8a unioned both halves instead, which credited a state with siblings' whole
+  support (measured: `k = 300` against its own row's 11 on `example_dfc3_hg19_subset.bam`)
+  and with trials no occurrence offered it; `advntr/exact_caller.py`'s docstring records
+  that correction. `k <= N` is consequently NOT structural -- the `support >
+  opportunities` guard logs and refuses the call, and clamping is forbidden. That guard
+  compares two integers, not two sets: `k`'s occurrences and `N`'s trials are different
+  sets (measured, 0 identities outside their state's own spans on all eight public BAMs),
+  so a calibration, which holds the span signature table, must assert the subset property
+  itself.
+- **Not yet calibrated or measured.** The background must be frozen on a partition that
+  is not the holdout, and the operating point measured once afterwards. Until that is
+  done the flag is a mechanism, not a recommendation. Three things a calibration has to
+  condition on are written into `advntr/exact_caller.py`'s docstring rather than only
+  here: candidates reach the statistic only after the legacy support floor and the flank
+  boundary gates, so the null is for a truncated population; a compound `State`'s
+  aggregated event is "at least one component", whose null rate is not a per-slot `p0`;
+  and an aggregated `k == 0` is reported at a tail of 1.0 with a warning.
+
+### `--frameshift-calibration-out`: a capture surface, not a caller
+
+The third default-off flag (Task 8h; `advntr/settings.py` `FRAMESHIFT_CALIBRATION_OUT`,
+default `None`, written from `args.frameshift_calibration_out` at
+`advntr/advntr_commands.py:81`). It moves no decision at all: with it set,
+`OpportunityCounter.finalise` appends one record and returns exactly what it returned
+before. **Measured through the real CLI on `example_66bf_hg19_subset.bam`: the emitted
+six-column table is byte-identical across pre-change flag-off, post-change flag-off and
+post-change flag-on.** That is a one-BAM measurement, not a corpus claim.
+
+- **Why it exists at all.** PLAN Task 8 Step 3 has to freeze a background on a calibration
+  partition, and its estimator needs `N` for a `State` in the samples where that `State`
+  did NOT fire. Nothing carried it: `finalise` emits rows only for
+  `set(legacy_support) | set(self._support)`, the encoded diagnostics drop the identity
+  and span fields (`UNENCODED_FIELDS`), and `advntr/vntr_finder.py:429` publishes only the
+  records. The counter's span inventory -- the one object that generates every missing
+  denominator -- had never left the process.
+- **Independent of `--exact-frameshift-caller`, deliberately.** A calibration capture runs
+  with the caller OFF so it cannot perturb the calls it is measuring; the two flags are
+  read separately and neither implies the other.
+- **The format is JSON Lines, append.** One line per `finalise`, so a multi-VNTR
+  `-vid a,b` run does not overwrite itself, and every line carries `schema`, `version`,
+  `vntr_id`, `read_length` and `is_haploid` so a duplicate from a resumed run is
+  detectable offline. `sort_keys`, compact separators, no read name -- the anonymity
+  property `tests/test_frameshift_context.py:199` pins, re-checked here against the real
+  capture: 0 of 19,884 query names in the BAM appear anywhere in the file.
+- **It stores primitives and derives nothing, and that is checkable.** The line carries
+  the candidate rows and the span signature table with a distinct-identity count per
+  signature; `opportunity_spans` is excluded because it is exactly derivable from that
+  table with the shipped `parse_components` and `_signature_supports`. On the
+  `example_66bf` capture: 443,002 bytes total (1,014 rows, 1,373 spans), of which the span
+  table is 59,082, against 2,644,839 bytes for `opportunity_spans` alone -- 45x the input
+  that regenerates it. Recomputing every row's `opportunities` from the span table
+  reproduced the run exactly, 0 mismatches over all 1,014 rows.
+- **One obligation the format cannot discharge.** `advntr/exact_caller.py` says a consumer
+  holding the span table must assert that the identities behind `k` are among the trials
+  `N` counts. The exported table carries a COUNT per signature, not the identities, so an
+  offline consumer can re-check the cardinality but not the set; carrying the identities
+  costs 28x on the span table (1,683,975 bytes, 26,593 pairs). The set property is pinned
+  in-process instead, by `tests/test_frameshift_calibration.py`'s `TestSubsetObligation`.
+- **One file per sample, and the line never names the sample.** `vntr_id` says which VNTR
+  was scored; nothing says which sample, deliberately -- adVNTR is not told a cohort sample
+  id and the confidentiality boundary is cleaner when it cannot learn one. Sample identity
+  comes from the sink's path and the capture controller's manifest. The consequence, which
+  has to be stated rather than discovered: append several samples into one file and the
+  partition a line came from is unrecoverable.
+- **A shared path is a mistake the writer survives, not a supported mode.** A line is
+  443 KB, far above the size at which an append is atomic: eight barrier-synchronised
+  writers into one file leave an arbitrary number of the eight lines unparseable without a
+  lock. How many varies run to run, and
+  `advntr/frameshift_calibration.py`'s module docstring states that once -- cite it rather
+  than quoting a run. The stable figure is the test's: it catches a removed lock in 20 of
+  20 runs. The append holds an exclusive `fcntl.flock` across the whole write including
+  the flush, which makes the same eight-way test come out 8 of 8 parseable with every
+  `vntr_id` recovered. `flock` is advisory and binds only writers that take it, so
+  it is a guard against a mistake, not a licence to share a path. The writer also checks
+  that the file ends with a newline and supplies the missing one first, so a process
+  killed mid-write costs its own line and not the next good one.
+- **A consumer must ABORT on an unparseable line, and must never skip one.** This is the
+  contract, not a suggestion. Skipping a torn line silently drops that sample's
+  denominators, including every zero-support state it was the only witness for, and biases
+  the estimate in a direction nobody can bound afterwards. The writer's job is to confine
+  the damage to one line; refusing to continue is what makes that confinement worth
+  anything.
+- **The path is preflighted at startup** (`advntr/advntr_commands.py:82-95`), opened
+  `a+b` -- the writer's own mode, because it reads the last byte back -- and closed,
+  exactly as `--frameshift-background` is validated ten lines below. Without it an
+  unwritable path raises `IOError` only inside `finalise`, after every read has been
+  decoded. The preflight CREATES the file, so a run that fails later leaves a 0-byte sink:
+  an empty file therefore does not distinguish "the run failed" from "there were no
+  decision sites". That distinction belongs to the capture controller's manifest, which
+  records each sample's exit status, and deliberately not to this flag.
+- **`ru_length` is a row field.** `ru_length`, `ru_bp_coverage`, `ru_bp_coverage_ratio` and
+  `avg_bp_coverage` sit on candidate rows, so a pattern that produced no row at all
+  contributes none of them and its repeat-unit length is not recoverable from the line. `N`
+  is unaffected -- it comes from `spans` alone.
+- **The write is inside a counter method, which is a smell that is argued rather than
+  hidden.** `OpportunityCounter._spans` is the only place the inventory exists, and
+  `advntr/frameshift_calibration.py`'s module docstring carries the argument. The write is
+  not routed through `advntr/vntr_finder.py`, which stays at exactly 1212 lines; the
+  counter is handed the finder it belongs to at its single construction site
+  (`advntr/vntr_finder.py:238`) purely so a line can say which VNTR and which read length
+  it scored.
+
 ## Git and PRs
 
 - Conventional commits (`feat:`, `fix:`, `perf:`, `test:`, `build:`, `docs:`, `refactor:`).
@@ -220,20 +359,21 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **`wraparound=False` segfaults.** The code relies on negative indexing and `boundscheck`
   is already off. Verified empirically, not theorised.
 
-- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:1133`
+- **`select_illumina_reads` ignores its `hmm` argument.** `advntr/vntr_finder.py:883`
   unconditionally rebuilds the model from a read length derived from `samfile.head(5)`.
-  Two consequences: `iteratively_update_model` (`:1099`) passes a refined model that is
-  silently discarded, so its refinement loop cannot converge; and the model a run used is
-  *not* the one you handed it. On the corpus BAMs the derived length is 151, giving a
-  **2565**-state model — a hand-built `read_length=150` model has **2559**. Fingerprint
-  `finder.hmm` *after* the call, never before.
+  On the corpus BAMs the derived length is 151, giving a **2565**-state model — a
+  hand-built `read_length=150` model has **2559**. Fingerprint `finder.hmm` *after* the
+  call, never before. `genotype -fs -u` does **not** silently fail to converge:
+  `iteratively_update_model` (`advntr/vntr_finder.py:826-856`) rebuilds through the
+  non-enhanced `get_read_matcher_model`, whose `Model.from_matrix` call at
+  `advntr/hmm_utils.py:745` raises `AttributeError` on the enhanced backend.
 
 - **`derive_read_length` can IndexError.** It is `sorted(head(5) lengths)[3]`, so a BAM
   whose head yields fewer than four records crashes. Mirrored in the harness rather than
   papered over.
 
 - **`USE_TRAINED_HMMS = True` crashes.** `advntr/settings.py:9` disables it. The enhanced
-  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:112,119` would raise
+  `Model` has no `to_json`/`from_json`, so `advntr/vntr_finder.py:114,121` would raise
   `AttributeError`. The flag was turned off in 2018 for disk usage — a year before the
   backend that lacks the API was written.
 
@@ -248,10 +388,6 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
 - **The egg is zip-safe but ships `.so` files**, so they are extracted to
   `~/.cache/Python-Eggs` at first import. Stale after a rebuild; breaks on read-only
   `$HOME`.
-
-- **Tied mutations sort by count alone** (`advntr/vntr_finder.py:659`) over a Python 2
-  `defaultdict`, so their order follows hash-table layout and insertion history, not read
-  order. Preserving read order does **not** by itself make tied output deterministic.
 
 - **Final-column silent states are never drained.** The main loop is
   `for col in range(sequence_length)`, so silent states activated at `col == L` are
