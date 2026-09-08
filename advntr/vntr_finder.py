@@ -10,7 +10,8 @@ from Bio import pairwise2
 from Bio.Seq import Seq
 from Bio import SeqIO
 
-from advntr import coverage_guard, exact_caller, read_selection, repeat_order, settings
+from advntr import (adapter_filter, callable_cluster, coverage_guard,
+                    exact_caller, read_selection, repeat_order, settings)
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
@@ -215,6 +216,7 @@ class VNTRFinder:
         for i in range(len(pattern_clusters)):
             estimated_ru_count[str(i + 1)] = len(pattern_clusters[i])
             hmm_match_count[str(i + 1)] = len(pattern_clusters[i][0])  # sequence length itself
+        callable_cluster.validate_cluster_sizes(pattern_clusters, self.is_haploid)
         if self.is_frameshift_mode:
             # Build reference repeat order table once for a quick lookup
             repeat_unit_length = len(self.reference_vntr.pattern)
@@ -341,6 +343,9 @@ class VNTRFinder:
                             if current_state.startswith('I'):
                                 current_state += '_' + get_emitted_basepair_from_visited_states(
                                     current_state, visited_states, read.sequence)
+                            if settings.FILTER_ADAPTER_READTHROUGH and adapter_filter.is_adapter_driven_mutation(
+                                    current_state, observed_unit=read.sequence):
+                                continue
                             mutation_count_temp[current_state] = mutation_count_temp.get(current_state, 0) + 1
                             if i in raw_mutations:
                                 accepted_raw_mutations.append(raw_mutations[i])
@@ -823,36 +828,9 @@ class VNTRFinder:
 
     @time_usage
     def iteratively_update_model(self, alignment_file, unmapped_filtered_reads, selected_reads, hmm):
-        updated_selected_reads = selected_reads
-        fitness = sum([read.logp for read in selected_reads])
-        read_length = len(selected_reads[0].sequence)
-
-        reference_repeats = []
-        for reference_repeat in self.reference_vntr.get_repeat_segments():
-            sequence = str(reference_repeat).upper()
-            logp, vpath = hmm.viterbi(sequence)
-            reference_repeats.append(SelectedRead(sequence, logp, vpath))
-
-        logging.info('initial fitness: %s' % fitness)
-
-        flanking_region_size = read_length
-        left_flanking_region = self.reference_vntr.left_flanking_region[-flanking_region_size:]
-        right_flanking_region = self.reference_vntr.right_flanking_region[:flanking_region_size]
-        copies = self.get_copies_for_hmm(read_length)
-        max_steps = 1000
-        min_improvement = 1
-        for i in range(max_steps):
-            old_fitness = fitness
-            current_vpaths = [(read.sequence, read.vpath) for read in updated_selected_reads + reference_repeats]
-            hmm = get_read_matcher_model(left_flanking_region, right_flanking_region, None, copies, current_vpaths)
-            updated_selected_reads = self.select_illumina_reads(alignment_file, unmapped_filtered_reads, False, hmm)
-            fitness = sum([read.logp for read in selected_reads])
-
-            if fitness - old_fitness < min_improvement:
-                break
-
-        logging.info('final fitness: %s' % fitness)
-        return updated_selected_reads
+        raise NotImplementedError(
+            'iteratively_update_model is unsupported on this fork: requires '
+            'Model.from_matrix which was removed with the enhanced HMM backend.')
 
     @time_usage
     def select_illumina_reads(self, alignment_file, unmapped_filtered_reads, update=False, hmm=None):
@@ -947,6 +925,10 @@ class VNTRFinder:
                 continue
             if pending.is_low_quality and not self.recruit_read(logp, vpath, recruitment_score, length):
                 logging.debug('Rejected Read, low quality: %s' % sequence)
+                continue
+            if settings.FILTER_ADAPTER_READTHROUGH and adapter_filter.is_adapter_readthrough(
+                    sequence, vpath, settings.MIN_READ_MATCH_RATIO):
+                logging.debug('Rejected Read, adapter read-through or low match ratio: %s' % sequence)
                 continue
             selected_reads.append(SelectedRead(sequence, logp, vpath, pending.mapq,
                                                pending.reference_start, pending.query_name))

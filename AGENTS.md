@@ -96,7 +96,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1211 |
+| `advntr/vntr_finder.py` | 1193 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -364,9 +364,10 @@ VNtyper pins an exact commit, so nothing reaches users until step 4.
   On the corpus BAMs the derived length is 151, giving a **2565**-state model — a
   hand-built `read_length=150` model has **2559**. Fingerprint `finder.hmm` *after* the
   call, never before. `genotype -fs -u` does **not** silently fail to converge:
-  `iteratively_update_model` (`advntr/vntr_finder.py:826-856`) rebuilds through the
-  non-enhanced `get_read_matcher_model`, whose `Model.from_matrix` call at
-  `advntr/hmm_utils.py:745` raises `AttributeError` on the enhanced backend.
+  `-u/--update` is rejected at CLI argument parsing (`advntr/advntr_commands.py:63-66`),
+  and `iteratively_update_model` (`advntr/vntr_finder.py:825-828`) raises
+  `NotImplementedError` directly because model refinement relied on `Model.from_matrix`,
+  which was deleted with the enhanced backend (Issue #9).
 
 - **`derive_read_length` can IndexError.** It is `sorted(head(5) lengths)[3]`, so a BAM
   whose head yields fewer than four records crashes. Mirrored in the harness rather than

@@ -60,6 +60,10 @@ def get_default_vntrs(reference_vntrs, is_pacbio=False):
 
 
 def genotype(args, genotype_parser):
+    if getattr(args, 'update', False):
+        print_error(genotype_parser, '--update / -u is unsupported on this fork: '
+                                     'model refinement is not supported with the '
+                                     'enhanced HMM backend.')
     if args.alignment_file is None and args.fasta is None:
         print_error(genotype_parser, 'No input specified. Please specify alignment file or fasta file')
 
@@ -78,6 +82,9 @@ def genotype(args, genotype_parser):
     settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
     if getattr(args, 'rare_unit_coverage_guard', None) is not None:
         settings.MIN_RELATIVE_RU_COVERAGE = args.rare_unit_coverage_guard
+    settings.FILTER_ADAPTER_READTHROUGH = getattr(args, 'filter_adapter_readthrough', False)
+    if getattr(args, 'min_read_match_ratio', None) is not None:
+        settings.MIN_READ_MATCH_RATIO = args.min_read_match_ratio
     # Deliberately not gated on --exact-frameshift-caller: the capture that estimates a
     # background must run with the caller OFF, or it perturbs the calls it is measuring.
     settings.FRAMESHIFT_CALIBRATION_OUT = args.frameshift_calibration_out
