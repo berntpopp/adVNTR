@@ -42,7 +42,6 @@ class RepeatUnitLabelMap(object):
                     self.add_mapping(int(internal_id), label)
 
     def add_mapping(self, internal_id, external_label):
-        self._is_explicit = True
         internal_id = int(internal_id)
         if internal_id < 0:
             raise ValueError('Internal ID must be non-negative, got %d' % internal_id)
@@ -57,16 +56,15 @@ class RepeatUnitLabelMap(object):
             raise ValueError("External label cannot collide with insertion metadata (_LEN<int>): %r" % external_label)
         if external_label in self._external_to_internal and self._external_to_internal[external_label] != internal_id:
             raise ValueError('Duplicate external label %s mapped to multiple internal IDs' % external_label)
-        # If this internal_id already had a mapping, remove the old reverse entry
-        if internal_id in self._internal_to_external:
-            old_label = self._internal_to_external[internal_id]
-            if old_label in self._external_to_internal:
-                del self._external_to_internal[old_label]
 
-        # Prevent ambiguous label combinations where one label collides with an insertion on another
+        # Prevent ambiguous label combinations where one label collides with an insertion on another.
+        # Validate against other existing labels BEFORE mutating state so rejected updates preserve consistency.
+        old_label = self._internal_to_external.get(internal_id)
         ins_pattern = re.compile(r'^[ACGTNacgtn]+(_LEN\d+)?$', re.IGNORECASE)
         len_pattern = re.compile(r'^LEN\d+$', re.IGNORECASE)
         for existing in self._external_to_internal:
+            if existing == old_label:
+                continue
             if external_label.startswith(existing + '_'):
                 rem = external_label[len(existing) + 1:]
                 if ins_pattern.match(rem) or len_pattern.match(rem):
@@ -78,8 +76,12 @@ class RepeatUnitLabelMap(object):
                     raise ValueError("Ambiguous repeat unit label combination: '%s' collides with insertion on '%s'" %
                                      (existing, external_label))
 
+        # All validations passed; perform atomic state update
+        if old_label is not None and old_label in self._external_to_internal:
+            del self._external_to_internal[old_label]
         self._internal_to_external[internal_id] = external_label
         self._external_to_internal[external_label] = internal_id
+        self._is_explicit = True
 
     def to_external(self, internal_id):
         internal_id = int(internal_id)

@@ -85,6 +85,19 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
         lmap.add_mapping(1, 'RU1')
         self.assertEqual(lmap.to_internal('RU1'), 1)
 
+    def test_rejected_remapping_preserves_existing_bidirectional_mapping(self):
+        # With {0: 'X', 1: 'RU'}, attempting to remap 0 to ambiguous 'RU_A' must raise ValueError
+        # and preserve 0 <-> 'X' completely intact.
+        lmap = RepeatUnitLabelMap({0: 'X', 1: 'RU'})
+        with self.assertRaises(ValueError):
+            lmap.add_mapping(0, 'RU_A')
+        self.assertEqual(lmap.to_external(0), 'X')
+        self.assertEqual(lmap.to_internal('X'), 0)
+        # Attempting to assign 'X' to ID 2 must fail with duplicate error
+        with self.assertRaises(ValueError):
+            lmap.add_mapping(2, 'X')
+        self.assertEqual(lmap.to_internal('X'), 0)
+
     def test_composite_label_with_underscores(self):
         # External label contains underscores: 'RU_5C'
         lmap = RepeatUnitLabelMap({0: 'RU_5C'})
