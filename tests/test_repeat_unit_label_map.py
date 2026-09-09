@@ -22,6 +22,25 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
         self.assertEqual(lmap.to_internal('5'), 3)
         self.assertEqual(lmap.to_external(5), '7')
         self.assertEqual(lmap.to_internal('7'), 5)
+        # Unmapped keys in explicit mapping raise KeyError
+        with self.assertRaises(KeyError):
+            lmap.to_internal('4')
+        with self.assertRaises(KeyError):
+            lmap.to_external(6)
+
+    def test_unconfigured_legacy_fallback(self):
+        # Empty unconfigured map provides 1-based positional fallback
+        lmap = RepeatUnitLabelMap()
+        self.assertEqual(lmap.to_external(0), '1')
+        self.assertEqual(lmap.to_external(5), '6')
+        self.assertEqual(lmap.to_internal('6'), 5)
+        # State name translation round-trip in unconfigured mode
+        ext = lmap.translate_state_name_to_external('I10_5_A_LEN1')
+        self.assertEqual(ext, 'I10_6_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(ext), 'I10_5_A_LEN1')
+        del_ext = lmap.translate_state_name_to_external('D20_5')
+        self.assertEqual(del_ext, 'D20_6')
+        self.assertEqual(lmap.translate_state_name_to_internal(del_ext), 'D20_5')
 
     def test_state_name_translation(self):
         # Map internal 5 -> '6', 6 -> '7'
@@ -52,6 +71,87 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
         self.assertEqual(restored.model_id, 'custom_muc1')
         self.assertEqual(restored.to_external(2), 'RU5C')
         self.assertTrue(lmap.is_compatible_with(restored))
+
+    def test_remapping_internal_id_cleans_stale_reverse(self):
+        lmap = RepeatUnitLabelMap({0: 'RU1'})
+        self.assertEqual(lmap.to_internal('RU1'), 0)
+        # Remap 0 to 'RU7'
+        lmap.add_mapping(0, 'RU7')
+        self.assertEqual(lmap.to_external(0), 'RU7')
+        self.assertEqual(lmap.to_internal('RU7'), 0)
+        # 'RU1' should no longer point to 0 and can be assigned to internal 1
+        with self.assertRaises(KeyError):
+            lmap.to_internal('RU1')
+        lmap.add_mapping(1, 'RU1')
+        self.assertEqual(lmap.to_internal('RU1'), 1)
+
+    def test_composite_label_with_underscores(self):
+        # External label contains underscores: 'RU_5C'
+        lmap = RepeatUnitLabelMap({0: 'RU_5C'})
+        ext = lmap.translate_state_name_to_external('I10_0_A_LEN1')
+        self.assertEqual(ext, 'I10_RU_5C_A_LEN1')
+        internal = lmap.translate_state_name_to_internal(ext)
+        self.assertEqual(internal, 'I10_0_A_LEN1')
+
+        # Deletion
+        del_ext = lmap.translate_state_name_to_external('D20_0')
+        self.assertEqual(del_ext, 'D20_RU_5C')
+        self.assertEqual(lmap.translate_state_name_to_internal(del_ext), 'D20_0')
+
+    def test_overlapping_prefix_label_roundtrip(self):
+        # Labels overlapping across underscores: 'RU' and 'RU_A'
+        lmap = RepeatUnitLabelMap({0: 'RU', 1: 'RU_A'})
+        state = 'I10_0_A_LEN1'
+        ext = lmap.translate_state_name_to_external(state)
+        self.assertEqual(ext, 'I10_RU_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(ext), state)
+
+    def test_explicitly_empty_map_json_roundtrip(self):
+        # RepeatUnitLabelMap({}) is in explicit mode and strictly rejects unknown IDs
+        m = RepeatUnitLabelMap({})
+        with self.assertRaises(KeyError):
+            m.to_external(0)
+        # Deserialized copy must preserve explicit mode and continue raising KeyError
+        restored = RepeatUnitLabelMap.from_json(m.to_json())
+        with self.assertRaises(KeyError):
+            restored.to_external(0)
+        self.assertTrue(m.is_compatible_with(restored))
+
+    def test_unconfigured_map_json_roundtrip(self):
+        # RepeatUnitLabelMap() is in unconfigured mode and uses 1-based positional fallback
+        m = RepeatUnitLabelMap()
+        self.assertEqual(m.to_external(0), '1')
+        restored = RepeatUnitLabelMap.from_json(m.to_json())
+        self.assertEqual(restored.to_external(0), '1')
+        self.assertTrue(m.is_compatible_with(restored))
+        # Explicitly empty map is not compatible with unconfigured map
+        explicit_empty = RepeatUnitLabelMap({})
+        self.assertFalse(explicit_empty.is_compatible_with(m))
+
+    def test_state_name_translation_unmapped_explicit_raises(self):
+        lmap = RepeatUnitLabelMap({0: '1', 1: '2', 2: '3', 3: '5', 4: '6', 5: '7'})
+        # D20_4 has unmapped external label '4'
+        with self.assertRaises(KeyError):
+            lmap.translate_state_name_to_internal('D20_4')
+        with self.assertRaises(KeyError):
+            lmap.translate_state_name_to_internal('I20_4_A_LEN1')
+        with self.assertRaises(KeyError):
+            lmap.translate_state_name_to_internal('M20_4')
+
+    def test_composite_label_ending_with_len_suffix_roundtrip(self):
+        lmap = RepeatUnitLabelMap({0: 'RU_A_LEN1'})
+        # Deletion
+        del_ext = lmap.translate_state_name_to_external('D20_0')
+        self.assertEqual(del_ext, 'D20_RU_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(del_ext), 'D20_0')
+        # Match
+        m_ext = lmap.translate_state_name_to_external('M20_0')
+        self.assertEqual(m_ext, 'M20_RU_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(m_ext), 'M20_0')
+        # Insertion with its own insertion suffix
+        ins_ext = lmap.translate_state_name_to_external('I20_0_C_LEN2')
+        self.assertEqual(ins_ext, 'I20_RU_A_LEN1_C_LEN2')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_ext), 'I20_0_C_LEN2')
 
 
 if __name__ == '__main__':

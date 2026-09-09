@@ -6,9 +6,8 @@ from multiprocessing import Process, Manager, Value, Semaphore
 from random import random
 
 import pysam
-from Bio import pairwise2
+from Bio import SeqIO, pairwise2
 from Bio.Seq import Seq
-from Bio import SeqIO
 
 from advntr import (adapter_filter, callable_cluster, coverage_guard,
                     exact_caller, read_selection, repeat_order, settings)
@@ -270,6 +269,14 @@ class VNTRFinder:
 
             visited_states = [state.name for idx, state in read.vpath[1:-1]]
             raw_mutations = extract_raw_mutations(visited_states, read.sequence, reference_units)
+            adapter_occurrences = set(
+                m.repeat_occurrence for m in raw_mutations.values()
+                if m.repeat_occurrence in ('partial_start', 'partial_end') and m.event and m.event.type == 'I'
+                and (adapter_filter.contains_adapter_kmer(m.event.inserted_sequence) or
+                     adapter_filter.is_adapter_at_insertion(m.observed_unit, m.unit_offset, len(m.event.inserted_sequence)))
+            ) if settings.FILTER_ADAPTER_READTHROUGH else set()
+            if adapter_occurrences:
+                raw_mutations = extract_raw_mutations(visited_states, read.sequence, reference_units, adapter_occurrences)
             accepted_raw_mutations = []
             logging.debug("ReadName:{}".format(read.query_name))
             logging.debug("Read:{}".format(read.sequence))
@@ -280,22 +287,15 @@ class VNTRFinder:
             ru_state_count, full_repeat_start, full_repeat_end = get_repeating_unit_state_count(
                 visited_states, read.sequence, pattern_clusters)
             fully_observed_ru_count = len(ru_state_count)
-            if 'partial_start' in ru_state_count:
-                fully_observed_ru_count -= 1
-            if 'partial_end' in ru_state_count:
-                fully_observed_ru_count -= 1
+            fully_observed_ru_count -= sum(1 for p in ('partial_start', 'partial_end') if p in ru_state_count)
 
             current_repeat = None
             is_valid_read = True
 
             # Keep all mutations in a read, update them only if the read is valid
-            mutation_count_temp = OrderedDict()
-            prefix_suffix_mutation_count_temp = OrderedDict()
+            mutation_count_temp = OrderedDict(); prefix_suffix_mutation_count_temp = OrderedDict()
 
-            prefix_match_count = 0
-            prefix_mutation_count = 0
-            suffix_match_count = 0
-            suffix_mutation_count = 0
+            prefix_match_count = prefix_mutation_count = suffix_match_count = suffix_mutation_count = 0
 
             for i in range(len(visited_states)):
                 current_state = visited_states[i]
@@ -303,15 +303,11 @@ class VNTRFinder:
                 if current_state.startswith('unit_start'):
                     if not is_valid_read:
                         break
-                    if current_repeat is None:
-                        current_repeat = 0
-                    else:
-                        current_repeat += 1
+                    current_repeat = 0 if current_repeat is None else current_repeat + 1
 
                 if current_state.endswith('fix'):  # Save all mutations observed in prefix or suffix
                     if current_state.startswith('I') or current_state.startswith('D'):
-                        prefix_suffix_mutation_count_temp[current_state] = \
-                            prefix_suffix_mutation_count_temp.get(current_state, 0) + 1
+                        prefix_suffix_mutation_count_temp[current_state] = prefix_suffix_mutation_count_temp.get(current_state, 0) + 1
                         if i in raw_mutations:
                             accepted_raw_mutations.append(raw_mutations[i])
                     if current_state.endswith('prefix'):
@@ -335,17 +331,14 @@ class VNTRFinder:
                         continue
                     if 'partial_start' in ru_state_count or 'partial_end' in ru_state_count:
                         cur_repeat = 'partial_start' if current_repeat is None else 'partial_end'
-                        if ru_state_count[cur_repeat]['M'] < 5:
+                        if cur_repeat in adapter_occurrences or ru_state_count[cur_repeat]['M'] < 5:
                             continue
                         if ru_state_count[cur_repeat]['S'] >= 4:
                             continue
                         if ru_state_count[cur_repeat]['I'] != ru_state_count[cur_repeat]['D']:
                             if current_state.startswith('I'):
                                 current_state += '_' + get_emitted_basepair_from_visited_states(
-                                    current_state, visited_states, read.sequence)
-                            if settings.FILTER_ADAPTER_READTHROUGH and adapter_filter.is_adapter_driven_mutation(
-                                    current_state, observed_unit=read.sequence):
-                                continue
+                                    current_state, visited_states, read.sequence, adapter_occurrences)
                             mutation_count_temp[current_state] = mutation_count_temp.get(current_state, 0) + 1
                             if i in raw_mutations:
                                 accepted_raw_mutations.append(raw_mutations[i])
@@ -356,8 +349,7 @@ class VNTRFinder:
                     continue
 
                 pattern_length = len(pattern_clusters[int(pattern_index) - 1][0])
-                inserted_bp = abs(ru_state_count[current_repeat]['M'] +
-                                  ru_state_count[current_repeat]['I'] - pattern_length)
+                inserted_bp = abs(ru_state_count[current_repeat]['M'] + ru_state_count[current_repeat]['I'] - pattern_length)
 
                 if inserted_bp > pattern_length / 2:
                     logging.debug("Rejected read: #M + #I - len(pattern) > {} bp in pattern {}, inserted {} bps".format(
@@ -379,8 +371,8 @@ class VNTRFinder:
 
                 # If there are run of insertions, the sequence might differ, but we just take the first base
                 if current_state.startswith('I'):
-                    current_state += '_' + get_emitted_basepair_from_visited_states(current_state, visited_states,
-                                                                                    read.sequence)
+                    current_state += '_' + get_emitted_basepair_from_visited_states(
+                        current_state, visited_states, read.sequence, adapter_occurrences)
 
                 mutation_count_temp[current_state] = mutation_count_temp.get(current_state, 0) + 1
                 if i in raw_mutations:
@@ -393,8 +385,8 @@ class VNTRFinder:
                 # Before the short-circuit below, or every clean read -- the whole
                 # zero-support inventory -- is lost. N follows read.vpath as the in-place
                 # realignment rewrite at :270 leaves it, should issue #5 enable that block.
-                opportunities.observe_read(selected_read_index, read.query_name,
-                                           visited_states, accepted_raw_mutations, ru_state_count)
+                opportunities.observe_read(selected_read_index, read.query_name, visited_states,
+                                           accepted_raw_mutations, ru_state_count, adapter_occurrences)
                 if len(mutation_count_temp) == 0:
                     continue
                 for candidate, legacy_keys in legacy_mutation_candidates(mutation_count_temp):
@@ -828,9 +820,8 @@ class VNTRFinder:
 
     @time_usage
     def iteratively_update_model(self, alignment_file, unmapped_filtered_reads, selected_reads, hmm):
-        raise NotImplementedError(
-            'iteratively_update_model is unsupported on this fork: requires '
-            'Model.from_matrix which was removed with the enhanced HMM backend.')
+        raise NotImplementedError('iteratively_update_model is unsupported on this fork: requires '
+                                  'Model.from_matrix which was removed with the enhanced HMM backend.')
 
     @time_usage
     def select_illumina_reads(self, alignment_file, unmapped_filtered_reads, update=False, hmm=None):

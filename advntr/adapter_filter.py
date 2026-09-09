@@ -32,14 +32,19 @@ ADAPTER_KMERS = (
     'TCCGATCT',       # 8-mer core RC
 )
 
-# Degenerate TruSeq adapter core pattern with 1-2 sequencing errors (e.g. AGAACGGA, AGCGCGGA)
-ADAPTER_DEGENERATE_REGEX = re.compile(r'AG[ACGT]{2}CGGA', re.IGNORECASE)
+# Long full-length adapter sequences
+LONG_ADAPTER_KMERS = (
+    'AGATCGGAAGAGC',        # Universal TruSeq 13-mer
+    'GCTCTTCCGATCT',        # TruSeq reverse complement 13-mer
+    'CTGTCTCTTATACACATCT',  # Nextera transposase
+    'AGATGTGTATAAGAGACAG',  # Nextera reverse complement
+)
 
 DEFAULT_MIN_GENUINE_MATCH_RATIO = 0.60
 
 
 def contains_adapter_kmer(sequence, kmers=None):
-    """Check if sequence contains any known adapter k-mer or degenerate core."""
+    """Check if sequence contains any known adapter k-mer."""
     if not sequence:
         return False
     if kmers is None:
@@ -48,8 +53,6 @@ def contains_adapter_kmer(sequence, kmers=None):
     for kmer in kmers:
         if kmer in seq_upper:
             return True
-    if ADAPTER_DEGENERATE_REGEX.search(seq_upper):
-        return True
     return False
 
 
@@ -77,23 +80,53 @@ def is_adapter_readthrough(sequence, vpath=None, min_match_ratio=DEFAULT_MIN_GEN
     if not sequence:
         return False
 
+    if min_match_ratio is None:
+        min_match_ratio = DEFAULT_MIN_GENUINE_MATCH_RATIO
+
+    # If vpath is available, evaluate genuine match ratio
+    if vpath is not None:
+        ratio = genuine_match_ratio(vpath, len(sequence))
+        # Reads failing genuine match ratio are poorly matching / adapter read-through
+        if min_match_ratio > 0 and ratio < min_match_ratio:
+            return True
+        # Reads with high genuine match ratio (>= 0.75) are genuine VNTR reads.
+        # Only reject if they contain a full-length adapter (>= 13-mer).
+        if ratio >= 0.75:
+            seq_upper = sequence.upper()
+            return any(kmer in seq_upper for kmer in LONG_ADAPTER_KMERS)
+
     # Check for adapter sequence
     if contains_adapter_kmer(sequence):
         return True
 
-    # If vpath is available, check genuine match ratio
-    if vpath is not None and min_match_ratio is not None and min_match_ratio > 0:
-        ratio = genuine_match_ratio(vpath, len(sequence))
-        if ratio < min_match_ratio:
-            return True
-
     return False
 
 
-def is_adapter_driven_mutation(candidate_state, inserted_seq='', observed_unit=''):
+def is_adapter_at_insertion(observed_unit, ins_start, ins_len, kmers=None):
+    """Check if an adapter k-mer overlaps or spans an insertion boundary."""
+    if not observed_unit or ins_len <= 0 or ins_start is None:
+        return False
+    if kmers is None:
+        kmers = ADAPTER_KMERS
+    obs_upper = observed_unit.upper()
+    ins_end = ins_start + ins_len
+    for kmer in kmers:
+        klen = len(kmer)
+        pos = obs_upper.find(kmer)
+        while pos != -1:
+            k_end = pos + klen
+            if max(pos, ins_start) < min(k_end, ins_end):
+                return True
+            pos = obs_upper.find(kmer, pos + 1)
+    return False
+
+
+def is_adapter_driven_mutation(candidate_state, inserted_seq='', observed_unit='', ins_start=None):
     """Check if a candidate mutation in a partial repeat unit is driven by adapter sequence."""
     if inserted_seq and contains_adapter_kmer(inserted_seq):
         return True
-    if observed_unit and contains_adapter_kmer(observed_unit):
+    if observed_unit and ins_start is not None and inserted_seq:
+        return is_adapter_at_insertion(observed_unit, ins_start, len(inserted_seq))
+    if observed_unit and contains_adapter_kmer(observed_unit) and ins_start is None:
         return True
     return False

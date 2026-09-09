@@ -31,6 +31,7 @@ class RepeatUnitLabelMap(object):
         self.model_id = str(model_id) if model_id is not None else None
         self._internal_to_external = {}
         self._external_to_internal = {}
+        self._is_explicit = (mapping is not None)
 
         if mapping is not None:
             if isinstance(mapping, (list, tuple)):
@@ -41,12 +42,18 @@ class RepeatUnitLabelMap(object):
                     self.add_mapping(int(internal_id), label)
 
     def add_mapping(self, internal_id, external_label):
+        self._is_explicit = True
         internal_id = int(internal_id)
         external_label = str(external_label).strip()
         if not external_label:
             raise ValueError('External label cannot be empty')
         if external_label in self._external_to_internal and self._external_to_internal[external_label] != internal_id:
             raise ValueError('Duplicate external label %s mapped to multiple internal IDs' % external_label)
+        # If this internal_id already had a mapping, remove the old reverse entry
+        if internal_id in self._internal_to_external:
+            old_label = self._internal_to_external[internal_id]
+            if old_label in self._external_to_internal:
+                del self._external_to_internal[old_label]
         self._internal_to_external[internal_id] = external_label
         self._external_to_internal[external_label] = internal_id
 
@@ -54,14 +61,18 @@ class RepeatUnitLabelMap(object):
         internal_id = int(internal_id)
         if internal_id in self._internal_to_external:
             return self._internal_to_external[internal_id]
-        # Default fallback if unmapped: str(internal_id + 1) for 0-indexed internal
+        if self._is_explicit:
+            raise KeyError('Unknown internal ID: %d' % internal_id)
+        # Default fallback if unmapped and no explicit mapping configured: str(internal_id + 1)
         return str(internal_id + 1)
 
     def to_internal(self, external_label):
         external_label = str(external_label).strip()
         if external_label in self._external_to_internal:
             return self._external_to_internal[external_label]
-        # Default fallback: try parsing as int - 1
+        if self._is_explicit:
+            raise KeyError('Unknown external label: %s' % external_label)
+        # Default fallback if unmapped and no explicit mapping configured: try parsing as int - 1
         try:
             return int(external_label) - 1
         except ValueError:
@@ -104,17 +115,38 @@ class RepeatUnitLabelMap(object):
     def _translate_single_component_to_internal(self, component):
         if 'prefix' in component or 'suffix' in component:
             return component
-        parts = component.split('_')
-        if len(parts) >= 2 and parts[0][0] in ('M', 'I', 'D', 'S'):
-            external_label = parts[1]
-            if external_label in self._external_to_internal:
-                parts[1] = str(self._external_to_internal[external_label])
-                return '_'.join(parts)
-        return component
+        m = re.match(r'^([MIDSmids]\d+)_(.+)$', component)
+        if not m:
+            return component
+        prefix = m.group(1)
+        rest = m.group(2)
+
+        # Strip insertion metadata suffix if present (e.g. _A_LEN1 or _AGATCGGA_LEN8) on insertion states only
+        ins_suffix = ''
+        if prefix.startswith(('I', 'i')):
+            m_ins = re.search(r'(_[ACGTNacgtn]+_LEN\d+)$', rest)
+            if m_ins:
+                ins_suffix = m_ins.group(1)
+                rest = rest[:-len(ins_suffix)]
+
+        if self._is_explicit:
+            for ext_label in sorted(self._external_to_internal.keys(), key=len, reverse=True):
+                if rest == ext_label:
+                    return '%s_%d%s' % (prefix, self._external_to_internal[ext_label], ins_suffix)
+            raise KeyError('Unknown external label: %s in %s' % (rest, component))
+        # Unconfigured / legacy fallback: 1-based to 0-based integer
+        parts = rest.split('_')
+        try:
+            internal_id = int(parts[0]) - 1
+            parts[0] = str(internal_id)
+            return '%s_%s%s' % (prefix, '_'.join(parts), ins_suffix)
+        except ValueError:
+            return component
 
     def to_dict(self):
         return {
             'model_id': self.model_id,
+            'is_explicit': self._is_explicit,
             'mapping': {str(k): v for k, v in self._internal_to_external.items()}
         }
 
@@ -123,11 +155,11 @@ class RepeatUnitLabelMap(object):
 
     @classmethod
     def from_dict(cls, data):
-        mapping = data.get('mapping', {})
+        mapping = data.get('mapping')
         model_id = data.get('model_id')
-        label_map = cls(model_id=model_id)
-        for k, v in mapping.items():
-            label_map.add_mapping(int(k), v)
+        is_explicit = data.get('is_explicit', mapping is not None)
+        label_map = cls(mapping=mapping, model_id=model_id)
+        label_map._is_explicit = is_explicit
         return label_map
 
     @classmethod
@@ -138,6 +170,8 @@ class RepeatUnitLabelMap(object):
     def is_compatible_with(self, other_map):
         """Verify that external labels and model identities match."""
         if not isinstance(other_map, RepeatUnitLabelMap):
+            return False
+        if self._is_explicit != other_map._is_explicit:
             return False
         if self.model_id and other_map.model_id and self.model_id != other_map.model_id:
             return False
