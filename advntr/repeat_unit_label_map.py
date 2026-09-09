@@ -62,6 +62,22 @@ class RepeatUnitLabelMap(object):
             old_label = self._internal_to_external[internal_id]
             if old_label in self._external_to_internal:
                 del self._external_to_internal[old_label]
+
+        # Prevent ambiguous label combinations where one label collides with an insertion on another
+        ins_pattern = re.compile(r'^[ACGTNacgtn]+(_LEN\d+)?$', re.IGNORECASE)
+        len_pattern = re.compile(r'^LEN\d+$', re.IGNORECASE)
+        for existing in self._external_to_internal:
+            if external_label.startswith(existing + '_'):
+                rem = external_label[len(existing) + 1:]
+                if ins_pattern.match(rem) or len_pattern.match(rem):
+                    raise ValueError("Ambiguous repeat unit label combination: '%s' collides with insertion on '%s'" %
+                                     (external_label, existing))
+            if existing.startswith(external_label + '_'):
+                rem = existing[len(external_label) + 1:]
+                if ins_pattern.match(rem) or len_pattern.match(rem):
+                    raise ValueError("Ambiguous repeat unit label combination: '%s' collides with insertion on '%s'" %
+                                     (existing, external_label))
+
         self._internal_to_external[internal_id] = external_label
         self._external_to_internal[external_label] = internal_id
 

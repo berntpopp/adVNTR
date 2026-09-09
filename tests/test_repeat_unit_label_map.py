@@ -99,12 +99,17 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
         self.assertEqual(lmap.translate_state_name_to_internal(del_ext), 'D20_0')
 
     def test_overlapping_prefix_label_roundtrip(self):
-        # Labels overlapping across underscores: 'RU' and 'RU_A'
-        lmap = RepeatUnitLabelMap({0: 'RU', 1: 'RU_A'})
+        # Labels overlapping across underscores with non-nucleotide suffixes: 'RU' and 'RU_motif'
+        lmap = RepeatUnitLabelMap({0: 'RU', 1: 'RU_motif'})
         state = 'I10_0_A_LEN1'
         ext = lmap.translate_state_name_to_external(state)
         self.assertEqual(ext, 'I10_RU_A_LEN1')
         self.assertEqual(lmap.translate_state_name_to_internal(ext), state)
+        # Unit 1 roundtrip
+        state1 = 'I10_1_A_LEN1'
+        ext1 = lmap.translate_state_name_to_external(state1)
+        self.assertEqual(ext1, 'I10_RU_motif_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(ext1), state1)
 
     def test_explicitly_empty_map_json_roundtrip(self):
         # RepeatUnitLabelMap({}) is in explicit mode and strictly rejects unknown IDs
@@ -146,6 +151,13 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
             RepeatUnitLabelMap({0: 'RU_LEN2'})
         with self.assertRaises(ValueError):
             RepeatUnitLabelMap({0: 'LEN1'})
+        # Labels colliding with insertion of bases on a prefix label must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU', 1: 'RU_A'})
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU_A', 1: 'RU'})
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU', 1: 'RU_AGATCGGA'})
         # Labels containing compound delimiter '&' must be rejected
         with self.assertRaises(ValueError):
             RepeatUnitLabelMap({0: 'RU&7'})
@@ -162,18 +174,23 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
             RepeatUnitLabelMap({-1: 'RU1'})
 
     def test_composite_label_without_len_suffix_roundtrip(self):
-        lmap = RepeatUnitLabelMap({0: 'RU_A', 1: 'RU'})
+        # Non-colliding labels like RU_A and RU_C
+        lmap = RepeatUnitLabelMap({0: 'RU_A', 1: 'RU_C'})
         # Exact state translation (no insertion metadata)
         self.assertEqual(lmap.translate_state_name_to_external('I10_0'), 'I10_RU_A')
         self.assertEqual(lmap.translate_state_name_to_internal('I10_RU_A'), 'I10_0')
+        # Insertion with base but no LEN
+        ins_base = lmap.translate_state_name_to_external('I10_0_G')
+        self.assertEqual(ins_base, 'I10_RU_A_G')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_base), 'I10_0_G')
         # Insertion with emitted base and length on RU_A
-        ins_ext = lmap.translate_state_name_to_external('I10_0_C_LEN2')
-        self.assertEqual(ins_ext, 'I10_RU_A_C_LEN2')
-        self.assertEqual(lmap.translate_state_name_to_internal(ins_ext), 'I10_0_C_LEN2')
-        # Insertion on RU: 'I10_1_A_LEN1' -> 'I10_RU_A_LEN1' -> correctly resolves to unit 1 (RU)
-        ins_ru_ext = lmap.translate_state_name_to_external('I10_1_A_LEN1')
-        self.assertEqual(ins_ru_ext, 'I10_RU_A_LEN1')
-        self.assertEqual(lmap.translate_state_name_to_internal(ins_ru_ext), 'I10_1_A_LEN1')
+        ins_ext = lmap.translate_state_name_to_external('I10_0_G_LEN2')
+        self.assertEqual(ins_ext, 'I10_RU_A_G_LEN2')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_ext), 'I10_0_G_LEN2')
+        # Insertion on RU_C
+        ins_ru_c = lmap.translate_state_name_to_external('I10_1_T_LEN1')
+        self.assertEqual(ins_ru_c, 'I10_RU_C_T_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_ru_c), 'I10_1_T_LEN1')
         # Deletion and match states
         self.assertEqual(lmap.translate_state_name_to_external('D20_0'), 'D20_RU_A')
         self.assertEqual(lmap.translate_state_name_to_internal('D20_RU_A'), 'D20_0')
