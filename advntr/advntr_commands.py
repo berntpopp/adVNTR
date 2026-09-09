@@ -77,21 +77,24 @@ def genotype(args, genotype_parser):
 
     if args.threads < 1:
         print_error(genotype_parser, 'threads cannot be less than 1')
+    if getattr(args, 'rare_unit_coverage_guard', None) is not None:
+        val = args.rare_unit_coverage_guard
+        if math.isnan(val) or math.isinf(val) or val < 0.0:
+            print_error(genotype_parser, '--rare-unit-coverage-guard must be a finite non-negative float')
+    if getattr(args, 'min_read_match_ratio', None) is not None:
+        val = args.min_read_match_ratio
+        if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
+            print_error(genotype_parser, '--min-read-match-ratio must be a finite float between 0.0 and 1.0')
+
     settings.CORES = args.threads
     settings.PRUNE_REVERSE_DECODE = args.prune_reverse
     settings.EXACT_FRAMESHIFT_CALLER = args.exact_frameshift_caller
     settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
     if getattr(args, 'rare_unit_coverage_guard', None) is not None:
-        val = args.rare_unit_coverage_guard
-        if math.isnan(val) or math.isinf(val) or val < 0.0:
-            print_error(genotype_parser, '--rare-unit-coverage-guard must be a finite non-negative float')
-        settings.MIN_RELATIVE_RU_COVERAGE = val
+        settings.MIN_RELATIVE_RU_COVERAGE = args.rare_unit_coverage_guard
     settings.FILTER_ADAPTER_READTHROUGH = getattr(args, 'filter_adapter_readthrough', False)
     if getattr(args, 'min_read_match_ratio', None) is not None:
-        val = args.min_read_match_ratio
-        if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
-            print_error(genotype_parser, '--min-read-match-ratio must be a finite float between 0.0 and 1.0')
-        settings.MIN_READ_MATCH_RATIO = val
+        settings.MIN_READ_MATCH_RATIO = args.min_read_match_ratio
     # Deliberately not gated on --exact-frameshift-caller: the capture that estimates a
     # background must run with the caller OFF, or it perturbs the calls it is measuring.
     settings.FRAMESHIFT_CALIBRATION_OUT = args.frameshift_calibration_out
