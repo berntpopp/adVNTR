@@ -89,5 +89,3 @@ MIN_RELATIVE_RU_COVERAGE = None
 #: mutations in partial repeat units are rejected.
 FILTER_ADAPTER_READTHROUGH = False
 MIN_READ_MATCH_RATIO = None
-
-

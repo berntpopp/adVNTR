@@ -18,6 +18,7 @@ This module provides detection and filtering for adapter read-through reads and
 adapter-driven candidate mutations.
 """
 
+import math
 import re
 
 
@@ -82,6 +83,9 @@ def is_adapter_readthrough(sequence, vpath=None, min_match_ratio=DEFAULT_MIN_GEN
 
     if min_match_ratio is None:
         min_match_ratio = DEFAULT_MIN_GENUINE_MATCH_RATIO
+
+    if math.isnan(min_match_ratio) or math.isinf(min_match_ratio) or not (0.0 <= min_match_ratio <= 1.0):
+        raise ValueError('min_match_ratio must be a finite float between 0.0 and 1.0, got %s' % min_match_ratio)
 
     # If vpath is available, evaluate genuine match ratio
     if vpath is not None:

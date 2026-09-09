@@ -138,20 +138,47 @@ class TestRepeatUnitLabelMap(unittest.TestCase):
         with self.assertRaises(KeyError):
             lmap.translate_state_name_to_internal('M20_4')
 
-    def test_composite_label_ending_with_len_suffix_roundtrip(self):
-        lmap = RepeatUnitLabelMap({0: 'RU_A_LEN1'})
-        # Deletion
-        del_ext = lmap.translate_state_name_to_external('D20_0')
-        self.assertEqual(del_ext, 'D20_RU_A_LEN1')
-        self.assertEqual(lmap.translate_state_name_to_internal(del_ext), 'D20_0')
-        # Match
-        m_ext = lmap.translate_state_name_to_external('M20_0')
-        self.assertEqual(m_ext, 'M20_RU_A_LEN1')
-        self.assertEqual(lmap.translate_state_name_to_internal(m_ext), 'M20_0')
-        # Insertion with its own insertion suffix
-        ins_ext = lmap.translate_state_name_to_external('I20_0_C_LEN2')
-        self.assertEqual(ins_ext, 'I20_RU_A_LEN1_C_LEN2')
-        self.assertEqual(lmap.translate_state_name_to_internal(ins_ext), 'I20_0_C_LEN2')
+    def test_ambiguous_or_reserved_labels_rejected(self):
+        # Labels colliding with insertion metadata (_LEN<int>) must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU_A_LEN1'})
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU_LEN2'})
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'LEN1'})
+        # Labels containing compound delimiter '&' must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU&7'})
+        # Labels containing reserved flank identifiers 'prefix' or 'suffix' must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'RU_suffix_5'})
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: 'prefix_1'})
+        # Empty labels must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({0: ''})
+        # Negative internal IDs must be rejected
+        with self.assertRaises(ValueError):
+            RepeatUnitLabelMap({-1: 'RU1'})
+
+    def test_composite_label_without_len_suffix_roundtrip(self):
+        lmap = RepeatUnitLabelMap({0: 'RU_A', 1: 'RU'})
+        # Exact state translation (no insertion metadata)
+        self.assertEqual(lmap.translate_state_name_to_external('I10_0'), 'I10_RU_A')
+        self.assertEqual(lmap.translate_state_name_to_internal('I10_RU_A'), 'I10_0')
+        # Insertion with emitted base and length on RU_A
+        ins_ext = lmap.translate_state_name_to_external('I10_0_C_LEN2')
+        self.assertEqual(ins_ext, 'I10_RU_A_C_LEN2')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_ext), 'I10_0_C_LEN2')
+        # Insertion on RU: 'I10_1_A_LEN1' -> 'I10_RU_A_LEN1' -> correctly resolves to unit 1 (RU)
+        ins_ru_ext = lmap.translate_state_name_to_external('I10_1_A_LEN1')
+        self.assertEqual(ins_ru_ext, 'I10_RU_A_LEN1')
+        self.assertEqual(lmap.translate_state_name_to_internal(ins_ru_ext), 'I10_1_A_LEN1')
+        # Deletion and match states
+        self.assertEqual(lmap.translate_state_name_to_external('D20_0'), 'D20_RU_A')
+        self.assertEqual(lmap.translate_state_name_to_internal('D20_RU_A'), 'D20_0')
+        self.assertEqual(lmap.translate_state_name_to_external('M20_0'), 'M20_RU_A')
+        self.assertEqual(lmap.translate_state_name_to_internal('M20_RU_A'), 'M20_0')
 
 
 if __name__ == '__main__':

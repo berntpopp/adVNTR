@@ -418,6 +418,55 @@ class TestAdapterFilter(unittest.TestCase):
             settings.MIN_SUPPORTING_READ_COUNT = orig_min_support
             settings.FILTER_ADAPTER_READTHROUGH = orig_filter
 
+    def test_is_adapter_readthrough_rejects_invalid_thresholds(self):
+        """Test that is_adapter_readthrough raises ValueError for non-finite or out-of-range thresholds."""
+        from advntr.adapter_filter import is_adapter_readthrough
+        seq = 'ACGT' * 10
+        for invalid in [60.0, float('inf'), float('-inf'), float('nan'), -0.01, 1.01]:
+            with self.assertRaises(ValueError):
+                is_adapter_readthrough(seq, min_match_ratio=invalid)
+
+    def test_is_adapter_readthrough_accepts_valid_thresholds(self):
+        """Test that is_adapter_readthrough accepts valid finite thresholds in [0.0, 1.0]."""
+        from advntr.adapter_filter import is_adapter_readthrough
+        seq = 'ACGT' * 10
+        for valid in [0.0, 0.5, 0.6, 1.0]:
+            # Should evaluate without raising ValueError
+            result = is_adapter_readthrough(seq, min_match_ratio=valid)
+            self.assertIsInstance(result, bool)
+
+    def test_cli_refuses_invalid_match_ratio(self):
+        """Test that genotype command rejects invalid --min-read-match-ratio values."""
+        import argparse
+        from advntr.advntr_commands import genotype
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        genotype_parser = subparsers.add_parser('genotype')
+        genotype_parser.add_argument('-a', '--alignment_file', default='test.bam')
+
+        for invalid_val in [60.0, float('inf'), float('nan'), -0.5, 1.5]:
+            args = argparse.Namespace(
+                update=False,
+                alignment_file='test.bam',
+                fasta=None,
+                nanopore=False,
+                pacbio=False,
+                threads=1,
+                prune_reverse=False,
+                exact_frameshift_caller=False,
+                frameshift_background=None,
+                frameshift_calibration_out=None,
+                rare_unit_coverage_guard=None,
+                filter_adapter_readthrough=True,
+                min_read_match_ratio=invalid_val,
+                expansion=False,
+                coverage=None,
+                working_directory='.'
+            )
+            with self.assertRaises(SystemExit) as cm:
+                genotype(args, genotype_parser)
+            self.assertIn('--min-read-match-ratio must be a finite float between 0.0 and 1.0', str(cm.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

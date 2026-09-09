@@ -44,9 +44,17 @@ class RepeatUnitLabelMap(object):
     def add_mapping(self, internal_id, external_label):
         self._is_explicit = True
         internal_id = int(internal_id)
+        if internal_id < 0:
+            raise ValueError('Internal ID must be non-negative, got %d' % internal_id)
         external_label = str(external_label).strip()
         if not external_label:
             raise ValueError('External label cannot be empty')
+        if '&' in external_label:
+            raise ValueError("External label cannot contain '&' (reserved compound state delimiter): %r" % external_label)
+        if 'prefix' in external_label.lower() or 'suffix' in external_label.lower():
+            raise ValueError("External label cannot contain reserved flank identifiers 'prefix' or 'suffix': %r" % external_label)
+        if re.search(r'(^|_)([ACGTNacgtn]+_)?LEN\d+$', external_label, re.IGNORECASE):
+            raise ValueError("External label cannot collide with insertion metadata (_LEN<int>): %r" % external_label)
         if external_label in self._external_to_internal and self._external_to_internal[external_label] != internal_id:
             raise ValueError('Duplicate external label %s mapped to multiple internal IDs' % external_label)
         # If this internal_id already had a mapping, remove the old reverse entry
@@ -121,20 +129,30 @@ class RepeatUnitLabelMap(object):
         prefix = m.group(1)
         rest = m.group(2)
 
-        # Strip insertion metadata suffix if present (e.g. _A_LEN1 or _AGATCGGA_LEN8) on insertion states only
+        if self._is_explicit:
+            # 1. Exact match against an external label (no insertion metadata attached)
+            if rest in self._external_to_internal:
+                return '%s_%d' % (prefix, self._external_to_internal[rest])
+
+            # 2. Match external label prefix + valid insertion metadata suffix
+            if prefix.startswith(('I', 'i')):
+                for ext_label in sorted(self._external_to_internal.keys(), key=len, reverse=True):
+                    if rest.startswith(ext_label + '_'):
+                        suffix = rest[len(ext_label):]
+                        if re.match(r'^_[ACGTNacgtn]+(_LEN\d+)?$', suffix):
+                            return '%s_%d%s' % (prefix, self._external_to_internal[ext_label], suffix)
+
+            raise KeyError('Unknown external label: %s in %s' % (rest, component))
+
+        # Unconfigured / legacy fallback: 1-based to 0-based integer
+        # Strip insertion metadata suffix if present on insertion states only
         ins_suffix = ''
         if prefix.startswith(('I', 'i')):
-            m_ins = re.search(r'(_[ACGTNacgtn]+_LEN\d+)$', rest)
+            m_ins = re.search(r'(_[ACGTNacgtn]+(_LEN\d+)?)$', rest)
             if m_ins:
                 ins_suffix = m_ins.group(1)
                 rest = rest[:-len(ins_suffix)]
 
-        if self._is_explicit:
-            for ext_label in sorted(self._external_to_internal.keys(), key=len, reverse=True):
-                if rest == ext_label:
-                    return '%s_%d%s' % (prefix, self._external_to_internal[ext_label], ins_suffix)
-            raise KeyError('Unknown external label: %s in %s' % (rest, component))
-        # Unconfigured / legacy fallback: 1-based to 0-based integer
         parts = rest.split('_')
         try:
             internal_id = int(parts[0]) - 1
