@@ -505,12 +505,10 @@ class OpportunityCounter(object):
         self._estimated_ru_count = estimated_ru_count
         self._hmm_match_count = hmm_match_count
         self._is_haploid = is_haploid
-        self._support = defaultdict(list)
-        self._attribution = defaultdict(dict)
-        self._spans = OrderedDict()
+        self._support = defaultdict(list); self._attribution = defaultdict(dict); self._spans = OrderedDict()
 
     def observe_read(self, selected_read_index, query_name, visited_states,
-                     accepted_raw_mutations, ru_state_count):
+                     accepted_raw_mutations, ru_state_count, excluded_occurrences=None):
         """Record every occurrence of one valid read, indel or no indel.
 
         `_attribution` is `candidate -> State -> identities`, not `candidate -> States`:
@@ -521,7 +519,8 @@ class OpportunityCounter(object):
         gates = flank_ratio_gates(visited_states)
         supported = per_occurrence_candidates(accepted_raw_mutations)
         for span in occurrence_spans(visited_states):
-            if not is_eligible(span, ru_state_count, self._pattern_clusters, gates):
+            if (excluded_occurrences and span.occurrence in excluded_occurrences) or not is_eligible(
+                    span, ru_state_count, self._pattern_clusters, gates):
                 continue
             identity = (selected_read_index, query_name, span.occurrence)
             self._spans.setdefault(span.signature, []).append(identity)

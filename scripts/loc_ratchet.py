@@ -24,7 +24,9 @@ GRANDFATHERED = {
     # three sites' differences -- repeat-unit index, count, and the third site's `ID:`
     # log prefix against the other two's `VID:` -- are parameters, not tidied away.
     # Task 9 wires the rare-unit coverage guard into decide_and_record: 1212 -> 1211.
-    'advntr/vntr_finder.py': 1211,
+    # Issues #4, #7, #9 replace dead iteratively_update_model with NotImplementedError (-28),
+    # wire in adapter filtering, compound event rejection and cluster validation: 1211 -> 1184.
+    'advntr/vntr_finder.py': 1184,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx

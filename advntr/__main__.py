@@ -120,6 +120,13 @@ def main():
                                             'one file per sample: the line names the '
                                             'VNTR, never the sample (default-off; '
                                             'changes no call)')
+    genotype_others_group.add_argument('--filter-adapter-readthrough', action='store_true', default=False,
+                                       help='filter reads with adapter read-through and short partial '
+                                            'matches that cause false-positive indel calls (default-off; '
+                                            'see Issue #4)')
+    genotype_others_group.add_argument('--min-read-match-ratio', type=float, metavar='<float>', default=None,
+                                       help='minimum fraction of read length required to be genuine match '
+                                            'states in Viterbi alignment (default: 0.60 when adapter filter is enabled)')
     genotype_others_group.add_argument('-u', '--update', action='store_true', default=False,
                                        help='set this flag to iteratively update the model')
     genotype_others_group.add_argument('-vid', '--vntr_id', type=str, metavar='<text>', default=None,

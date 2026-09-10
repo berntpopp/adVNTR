@@ -8,7 +8,7 @@ MutationEvent = namedtuple(
 )
 RawMutation = namedtuple(
     'RawMutation',
-    'visited_index legacy_key repeat_occurrence observed_unit event'
+    'visited_index legacy_key repeat_occurrence observed_unit event unit_offset'
 )
 FrameshiftEvidence = namedtuple(
     'FrameshiftEvidence',
@@ -88,6 +88,7 @@ def occurrence_labels(visited_states):
 def _occurrences_and_bases(visited_states, sequence):
     occurrences = occurrence_labels(visited_states)
     emitted_bases = []
+    offsets_in_occurrence = []
     bases_by_occurrence = defaultdict(list)
     read_index = 0
 
@@ -98,12 +99,13 @@ def _occurrences_and_bases(visited_states, sequence):
             emitted_base = sequence[read_index]
             read_index += 1
         emitted_bases.append(emitted_base)
+        offsets_in_occurrence.append(len(bases_by_occurrence[occurrence]))
         if emitted_base is not None and (state.startswith('M') or state.startswith('I')):
             bases_by_occurrence[occurrence].append(emitted_base)
 
     observed_units = dict((occurrence, ''.join(bases))
                           for occurrence, bases in bases_by_occurrence.items())
-    return occurrences, emitted_bases, observed_units
+    return occurrences, emitted_bases, observed_units, offsets_in_occurrence
 
 
 def _reference_unit_for_state(state, reference_units):
@@ -116,13 +118,17 @@ def _reference_unit_for_state(state, reference_units):
     return reference_units[index]
 
 
-def extract_raw_mutations(visited_states, sequence, reference_units):
+def extract_raw_mutations(visited_states, sequence, reference_units, excluded_occurrences=None):
     """Retain vpath evidence before legacy State collapses insertion runs."""
-    occurrences, emitted_bases, observed_units = _occurrences_and_bases(visited_states, sequence)
+    occurrences, emitted_bases, observed_units, offsets_in_occurrence = _occurrences_and_bases(
+        visited_states, sequence)
     first_insertion_base = {}
     for index, state in enumerate(visited_states):
-        if state.startswith('I') and state not in first_insertion_base:
-            first_insertion_base[state] = emitted_bases[index]
+        if state.startswith('I'):
+            if excluded_occurrences and occurrences[index] in excluded_occurrences:
+                continue
+            if state not in first_insertion_base:
+                first_insertion_base[state] = emitted_bases[index]
 
     by_index = {}
     index = 0
@@ -133,7 +139,8 @@ def extract_raw_mutations(visited_states, sequence, reference_units):
         if state.startswith('D'):
             offset = int(state.split('_')[0][1:])
             event = MutationEvent('D', offset, '', None, None)
-            by_index[index] = RawMutation(index, state, occurrence, observed_unit, event)
+            by_index[index] = RawMutation(index, state, occurrence, observed_unit, event,
+                                          offsets_in_occurrence[index])
         elif state.startswith('I'):
             run_end = index + 1
             while (run_end < len(visited_states) and visited_states[run_end] == state and
@@ -153,8 +160,10 @@ def extract_raw_mutations(visited_states, sequence, reference_units):
             if state.endswith('suffix') or state.endswith('prefix'):
                 legacy_key = state
             else:
-                legacy_key = state + '_' + first_insertion_base[state]
-            by_index[index] = RawMutation(index, legacy_key, occurrence, observed_unit, event)
+                base = first_insertion_base.get(state, emitted_bases[index])
+                legacy_key = state + '_' + base
+            by_index[index] = RawMutation(index, legacy_key, occurrence, observed_unit, event,
+                                          offsets_in_occurrence[index])
             index = run_end - 1
         index += 1
     return by_index

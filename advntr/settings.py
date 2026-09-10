@@ -83,3 +83,9 @@ FRAMESHIFT_CALIBRATION_OUT = None
 #: false-positive calling (SPEC Q-RARE). None disables the guard.
 MIN_RELATIVE_RU_COVERAGE = None
 
+#: Default False (Issue #4, `--filter-adapter-readthrough`; Tier B, AGENTS.md).
+#: When True, reads containing Illumina adapter read-through k-mers or failing genuine
+#: match ratio are filtered during read recruitment, and adapter-driven candidate
+#: mutations in partial repeat units are rejected.
+FILTER_ADAPTER_READTHROUGH = False
+MIN_READ_MATCH_RATIO = None

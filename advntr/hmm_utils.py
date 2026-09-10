@@ -122,10 +122,12 @@ def get_multiple_alignment_of_repeats_from_reads(sequence_vpath_list):
     return get_multiple_alignment_of_viterbi_paths(repeats_sequences, repeats_visited_states)
 
 
-def get_emitted_basepair_from_visited_states(state, visited_states, sequence):
+def get_emitted_basepair_from_visited_states(state, visited_states, sequence, excluded_occurrences=None):
+    from advntr.mutation_keys import occurrence_labels
+    occurrences = occurrence_labels(visited_states) if excluded_occurrences else None
     base_pair_idx = 0
-    for visited_state in visited_states:
-        if visited_state == state:
+    for idx, visited_state in enumerate(visited_states):
+        if visited_state == state and (not occurrences or occurrences[idx] not in excluded_occurrences):
             return sequence[base_pair_idx]
         if is_matching_state(visited_state):
             base_pair_idx += 1
@@ -133,10 +135,8 @@ def get_emitted_basepair_from_visited_states(state, visited_states, sequence):
 
 
 def is_matching_state(state_name):
-    if state_name.startswith('M') or state_name.startswith('I') or state_name.startswith('start_random_matches') \
-            or state_name.startswith('end_random_matches'):
-        return True
-    return False
+    return (state_name.startswith('M') or state_name.startswith('I') or
+            state_name.startswith('start_random_matches') or state_name.startswith('end_random_matches'))
 
 
 def get_repeating_pattern_lengths(visited_states):
