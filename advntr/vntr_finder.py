@@ -13,6 +13,8 @@ from advntr import (adapter_filter, callable_cluster, coverage_guard,
                     exact_caller, frameshift_decisions, frameshift_statistics, read_selection,
                     repeat_order, settings)
 from advntr.frameshift_opportunities import OpportunityCounter
+from advntr.finder_hmm import FinderHMM
+from advntr.run_context import bind_owner, runtime_value
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
                                   extract_raw_mutations, legacy_mutation_candidates)
@@ -45,11 +47,11 @@ class SelectedRead:
         self.query_name = query_name
 
 
-class VNTRFinder:
+class VNTRFinder(FinderHMM):
     """Find the VNTR structure of a reference VNTR in NGS data of the donor."""
 
     def __init__(self, reference_vntr, is_haploid=False, reference_filename=None,
-                 is_frameshift_mode=False, frameshift_policy=None):
+                 is_frameshift_mode=False, frameshift_policy=None, run_context=None):
         self.reference_vntr = reference_vntr
         self.is_haploid = is_haploid
         self.reference_filename = reference_filename
@@ -63,8 +65,7 @@ class VNTRFinder:
         self.vntr_end = self.reference_vntr.get_genomic_end()
 
         self.is_frameshift_mode = is_frameshift_mode
-        self.frameshift_policy = frameshift_decisions.resolve_policy() if frameshift_policy is None else (
-            frameshift_decisions.validate_policy(frameshift_policy))
+        self.frameshift_policy = bind_owner(self, run_context, frameshift_policy, is_haploid, is_frameshift_mode)
         self.hmm = None
         # All replaced each invocation. Evidence and Task 7's shadow (k, N) opportunities
         # cover every eligible candidate; only Context is emitted, called-only, anonymous.
@@ -78,45 +79,6 @@ class VNTRFinder:
     @staticmethod
     def get_alignment_file_read_mode(alignment_file):
         return 'rc' if alignment_file.endswith('cram') else ('r' if alignment_file.endswith('sam') else 'rb')
-
-    @time_usage
-    def build_vntr_matcher_hmm(self, copies, flanking_region_size=100):
-        patterns = self.reference_vntr.get_repeat_segments()
-        sorted_unique_repeat_units = sorted(list(set(patterns)))
-        for i, ru in enumerate(sorted_unique_repeat_units):
-            logging.info("RU{} {}".format(i+1, ru))
-        left_flanking_region = self.reference_vntr.left_flanking_region[-flanking_region_size:]
-        right_flanking_region = self.reference_vntr.right_flanking_region[:flanking_region_size]
-
-        if settings.USE_ENHANCED_HMM:
-            vntr_matcher = get_read_matcher_model_enhanced(left_flanking_region, right_flanking_region,
-                                                           patterns, copies, None, self.is_frameshift_mode)
-        else:
-            vntr_matcher = get_read_matcher_model(left_flanking_region, right_flanking_region, patterns, copies)
-        return vntr_matcher
-
-    def get_vntr_matcher_hmm(self, read_length):
-        """Try to load trained HMM for this VNTR
-        If there was no trained HMM, it will build one and store it for later usage
-        """
-        logging.info('Using read length %s' % read_length)
-        copies = self.get_copies_for_hmm(read_length)
-
-        base_name = str(self.reference_vntr.id) + '_' + str(read_length) + '.json'
-        stored_hmm_file = settings.TRAINED_HMMS_DIR + base_name
-        if settings.USE_TRAINED_HMMS and os.path.isfile(stored_hmm_file):
-            model = Model()
-            model = model.from_json(stored_hmm_file)
-            return model
-
-        flanking_region_size = read_length
-        vntr_matcher = self.build_vntr_matcher_hmm(copies, flanking_region_size)
-
-        if settings.USE_TRAINED_HMMS:
-            json_str = vntr_matcher.to_json()
-            with open(stored_hmm_file, 'w') as outfile:
-                outfile.write(json_str)
-        return vntr_matcher
 
     def get_keywords_for_filtering(self, short_reads=True, keyword_size=21):
         vntr = ''.join(self.reference_vntr.get_repeat_segments())
@@ -191,7 +153,8 @@ class VNTRFinder:
     def find_frameshift_from_selected_reads(self, selected_reads):
         # One basis for every candidate. NOT a fail-fast -- `:977-978` has already
         # decoded every read; that is `advntr/advntr_commands.py:79-92`'s job.
-        background = exact_caller.configured_background()
+        background = (exact_caller.configured_background() if self.run_context is None
+                      else self.run_context.background)
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
         self.last_frameshift_opportunities = {}
@@ -218,7 +181,7 @@ class VNTRFinder:
             repeat_unit_length = len(self.reference_vntr.pattern)
             valid_repeat_orders_in_reference = repeat_order.get_valid_repeat_orders(reference_repeat_order)
             max_covered_repeat_ratio = float(self.hmm.read_length_used_to_build_model) / repeat_unit_length
-            if settings.USE_REF_ALIGNMENT and max_covered_repeat_ratio < 3:
+            if runtime_value(self, 'use_reference_alignment') and max_covered_repeat_ratio < 3:
                 logging.info('repeat-unit realignment is inactive: read length %s covers %.2f repeat units of '
                              'length %s (< 3)' % (self.hmm.read_length_used_to_build_model,
                                                   max_covered_repeat_ratio, repeat_unit_length))
@@ -226,7 +189,7 @@ class VNTRFinder:
         reference_units = [cluster[0] for cluster in pattern_clusters]
         opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid, self)
         for selected_read_index, read in enumerate(selected_reads):
-            if settings.USE_REF_ALIGNMENT:
+            if runtime_value(self, 'use_reference_alignment'):
                 # TODO: Read Vpath once
                 read_as_repeat_unit_number, annotated_read, unit_start_points = self.get_repeat_unit_number(read)
                 logging.debug("Reference repeat order: {}".format(reference_repeat_order))
@@ -271,7 +234,7 @@ class VNTRFinder:
                 if m.repeat_occurrence in ('partial_start', 'partial_end') and m.event and m.event.type == 'I'
                 and (adapter_filter.contains_adapter_kmer(m.event.inserted_sequence) or
                      adapter_filter.is_adapter_at_insertion(m.observed_unit, m.unit_offset, len(m.event.inserted_sequence)))
-            ) if settings.FILTER_ADAPTER_READTHROUGH else set()
+            ) if runtime_value(self, 'filter_adapter_readthrough') else set()
             if adapter_occurrences:
                 raw_mutations = extract_raw_mutations(visited_states, read.sequence, reference_units, adapter_occurrences)
             accepted_raw_mutations = []
@@ -324,7 +287,7 @@ class VNTRFinder:
 
                 # Reads starting/ending with a partially observed repeat unit
                 if current_repeat is None or current_repeat >= fully_observed_ru_count:
-                    if settings.USE_ONLY_FULLY_COVERED_RU:
+                    if runtime_value(self, 'fully_covered_ru_only'):
                         continue
                     if 'partial_start' in ru_state_count or 'partial_end' in ru_state_count:
                         cur_repeat = 'partial_start' if current_repeat is None else 'partial_end'
@@ -377,7 +340,8 @@ class VNTRFinder:
 
             if is_valid_read:
                 update_number_of_repeat_bp_matches_in_vpath_for_each_hmm(
-                    visited_states, ru_bp_coverage, full_repeat_start, full_repeat_end
+                    visited_states, ru_bp_coverage, full_repeat_start, full_repeat_end,
+                    runtime_value(self, 'fully_covered_ru_only')
                 )
                 # Before the short-circuit below, or every clean read -- the whole
                 # zero-support inventory -- is lost. N follows read.vpath as the in-place
@@ -435,13 +399,14 @@ class VNTRFinder:
                 expected_indel_transitions = 0.99 / (2 * estimated_ru_count[repeat_unit_index])
             logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
             if coverage_guard.is_rare_unit_coverage_collapsed(
-                    avg_bp_coverage, locus_coverage, settings.MIN_RELATIVE_RU_COVERAGE):
+                    avg_bp_coverage, locus_coverage, runtime_value(self, 'minimum_relative_ru_coverage')):
                 logging.info('Candidate %s skipped: RU%s coverage %.2f collapsed below relative threshold' %
                              (candidate, repeat_unit_index, avg_bp_coverage))
                 return
             if background is None:
                 seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                    avg_bp_coverage, count, expected_indel_transitions
+                    avg_bp_coverage, count, expected_indel_transitions,
+                    error_rate=runtime_value(self, 'legacy_error_rate')
                 )
                 logging.info('Sequencing error prob: %s' % seq_err_prob)
                 logging.info('Frame-shift prob: %s' % frameshift_prob)
@@ -547,7 +512,7 @@ class VNTRFinder:
             return
         min_left, max_left = 10e9, 0
         for aln in left_alignments:
-            if aln[2] < len(left_flanking) * (1 - settings.MAX_ERROR_RATE):
+            if aln[2] < len(left_flanking) * (1 - runtime_value(self, 'maximum_error_rate')):
                 continue
             min_left = min(min_left, aln[3])
             max_left = max(max_left, aln[3])
@@ -555,7 +520,7 @@ class VNTRFinder:
             with open('vntr_complex.txt', 'a') as out:
                 out.write('%s %s\n' % (self.reference_vntr.id, max_left - min_left))
         left_align = left_alignments[0]
-        if left_align[2] < len(left_flanking) * (1 - settings.MAX_ERROR_RATE):
+        if left_align[2] < len(left_flanking) * (1 - runtime_value(self, 'maximum_error_rate')):
             return
 
         right_alignments = pairwise2.align.localms(read_str, right_flanking, 1, -1, -1, -1)
@@ -563,7 +528,7 @@ class VNTRFinder:
             return
         min_right, max_right = 10e9, 0
         for aln in right_alignments:
-            if aln[2] < len(right_flanking) * (1 - settings.MAX_ERROR_RATE):
+            if aln[2] < len(right_flanking) * (1 - runtime_value(self, 'maximum_error_rate')):
                 continue
             min_right = min(min_right, aln[3])
             max_right = max(max_right, aln[3])
@@ -571,7 +536,7 @@ class VNTRFinder:
             with open('vntr_complex.txt', 'a') as out:
                 out.write('%s %s\n' % (self.reference_vntr.id, max_right - min_right))
         right_align = right_alignments[0]
-        if right_align[2] < len(right_flanking) * (1 - settings.MAX_ERROR_RATE):
+        if right_align[2] < len(right_flanking) * (1 - runtime_value(self, 'maximum_error_rate')):
             return
 
         if right_align[3] < left_align[3]:
@@ -607,7 +572,7 @@ class VNTRFinder:
 
     @time_usage
     def get_spanning_reads_of_unaligned_pacbio_reads(self, unmapped_filtered_reads):
-        sema = Semaphore(settings.CORES)
+        sema = Semaphore(runtime_value(self, 'threads'))
         manager = Manager()
         shared_length_distribution = manager.list()
         shared_spanning_reads = manager.list()
@@ -626,7 +591,7 @@ class VNTRFinder:
 
     @time_usage
     def get_spanning_reads_of_aligned_pacbio_reads(self, alignment_file):
-        sema = Semaphore(settings.CORES)
+        sema = Semaphore(runtime_value(self, 'threads'))
         manager = Manager()
         length_distribution = manager.list()
         mapped_spanning_reads = manager.list()
@@ -835,8 +800,8 @@ class VNTRFinder:
             read_lengths.append(len(read.seq))
         read_length = sorted(read_lengths)[3]
         MIN_READ_LENGTH = int(read_length * 0.9)
-        if settings.MIN_READ_LENGTH is not None:
-            MIN_READ_LENGTH = settings.MIN_READ_LENGTH
+        if runtime_value(self, 'minimum_read_length') is not None:
+            MIN_READ_LENGTH = runtime_value(self, 'minimum_read_length')
 
         recruitment_score = self.get_min_score_to_select_a_read(read_length)
 
@@ -875,15 +840,15 @@ class VNTRFinder:
                 reverse=str(Seq(read.seq).reverse_complement()).upper(),
                 mapq=read.mapq, reference_start=read.reference_start,
                 query_name=read.query_name,
-                is_low_quality=is_low_quality_read(read)))
+                is_low_quality=is_low_quality_read(read, None if self.run_context is None else self.run_context.capture)))
 
         # ---- Phase 2: the only parallel part. `Model.viterbi` assigns nothing to
         # `self`, so one baked model is shared read-only and every DP buffer is a
         # per-call local; the DP releases the GIL, which is what makes this worth
-        # anything. Snapshot both globals (thread count, Task 8's prune-reverse flag)
-        # so a concurrent change to either cannot alter phase 2 midway.
-        n_threads = read_selection.resolve_thread_count(settings.CORES)
-        read_selection.decode_pending(hmm, pending_reads, n_threads, bool(settings.PRUNE_REVERSE_DECODE))
+        # anything. Production reads both values from the same resolved run context;
+        # direct legacy library callers retain their settings compatibility path.
+        n_threads = read_selection.resolve_thread_count(runtime_value(self, 'threads'))
+        read_selection.decode_pending(hmm, pending_reads, n_threads, bool(runtime_value(self, 'prune_reverse')))
 
         # ---- Phase 3: serial, in original fetch order.
         for pending in pending_reads:
@@ -909,8 +874,8 @@ class VNTRFinder:
             if pending.is_low_quality and not self.recruit_read(logp, vpath, recruitment_score, length):
                 logging.debug('Rejected Read, low quality: %s' % sequence)
                 continue
-            if settings.FILTER_ADAPTER_READTHROUGH and adapter_filter.is_adapter_readthrough(
-                    sequence, vpath, settings.MIN_READ_MATCH_RATIO):
+            if runtime_value(self, 'filter_adapter_readthrough') and adapter_filter.is_adapter_readthrough(
+                    sequence, vpath, runtime_value(self, 'minimum_read_match_ratio')):
                 logging.debug('Rejected Read, adapter read-through or low match ratio: %s' % sequence)
                 continue
             selected_reads.append(SelectedRead(sequence, logp, vpath, pending.mapq,

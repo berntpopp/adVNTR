@@ -229,7 +229,8 @@ def write_if_configured(finder, is_haploid, span_counts, records):
     per-sample -- see the module docstring for what the writer guarantees when it is not,
     and for what no writer can guarantee.
     """
-    path = settings.FRAMESHIFT_CALIBRATION_OUT
+    context = getattr(finder, 'run_context', None)
+    path = settings.FRAMESHIFT_CALIBRATION_OUT if context is None else context.capture_path
     if not path:
         return None
     if finder is None:

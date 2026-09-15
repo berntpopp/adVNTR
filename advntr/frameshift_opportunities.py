@@ -363,7 +363,7 @@ def flank_ratio_gates(visited_states):
     return gates
 
 
-def is_eligible(span, ru_state_count, pattern_clusters, gates):
+def is_eligible(span, ru_state_count, pattern_clusters, gates, fully_covered=None):
     """Would this occurrence have been eligible had a candidate indel sat in it?
 
     See the module docstring for which legacy filters this applies and which two it
@@ -380,7 +380,8 @@ def is_eligible(span, ru_state_count, pattern_clusters, gates):
                       span.occurrence)
         return False
     if span.occurrence in PARTIAL_OCCURRENCES:
-        if settings.USE_ONLY_FULLY_COVERED_RU:
+        full = settings.USE_ONLY_FULLY_COVERED_RU if fully_covered is None else fully_covered
+        if full:
             return False
         return counts['M'] >= 5 and counts['S'] < 4
     if not pattern_index.isdigit():
@@ -500,7 +501,9 @@ class OpportunityCounter(object):
     """Accumulate integer `(k, N)` per candidate over one `find_frameshift` invocation."""
 
     def __init__(self, pattern_clusters, estimated_ru_count, hmm_match_count, is_haploid, finder=None):
-        self._finder = finder  # Read ONLY by the sink; see `write_if_configured`.
+        self._finder = finder
+        context = getattr(finder, 'run_context', None)
+        self._fully_covered = None if context is None else context.capture.fully_covered_ru_only
         self._pattern_clusters = pattern_clusters
         self._estimated_ru_count = estimated_ru_count
         self._hmm_match_count = hmm_match_count
@@ -520,7 +523,7 @@ class OpportunityCounter(object):
         supported = per_occurrence_candidates(accepted_raw_mutations)
         for span in occurrence_spans(visited_states):
             if (excluded_occurrences and span.occurrence in excluded_occurrences) or not is_eligible(
-                    span, ru_state_count, self._pattern_clusters, gates):
+                    span, ru_state_count, self._pattern_clusters, gates, self._fully_covered):
                 continue
             identity = (selected_read_index, query_name, span.occurrence)
             self._spans.setdefault(span.signature, []).append(identity)

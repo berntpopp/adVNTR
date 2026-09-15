@@ -2,8 +2,8 @@
 
 This module performs no I/O and does not read settings. Defaults are the verified
 fresh-command defaults, including the command's one thread rather than the
-host-dependent settings.CORES. It is not yet wired into production and does not
-advertise a capture or policy capability.
+host-dependent settings.CORES. Genotype binds these values through a run context. This raw contract does not
+advertise a new capture or JSON policy capability.
 
 This upstream raw contract retains None/zero read-match limits and nonnegative
 rare-unit fractions above one. VNtyper generated calibrated-v2 profiles have a

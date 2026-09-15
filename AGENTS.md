@@ -24,7 +24,20 @@ advntr fit-background --capture-root <root> --labels <manifest.json> \
 ```
 
 Everything else (`makedb`, copy-number genotyping, PacBio, plotting) still compiles and
-imports, but is untested and unsupported.
+imports, but is untested and unsupported. Long-read flags (`--pacbio`, `--nanopore`)
+cannot be combined with `--frameshift`: the command refuses them before opening a
+capture sink, model or reads. Existing long-read repeat-count dispatch is retained.
+
+Genotype resolves one run context and passes it through the analyzer and finder.
+Read eligibility, HMM error rate, reference alignment, full-unit coverage, decoder
+options and diagnostic policy use these explicit values; commands do not mutate
+policy settings for later invocations. The selected model path, loaded background
+and capture destination are separate run assets. Backgrounds load once per command,
+not from a process-wide path cache. Direct legacy library callers retain their
+settings-based compatibility path. This does not advertise capture v2 or replay.
+Calibration-affecting options require exact spellings and cannot be repeated, even
+through aliases. Raw adapter ratio None keeps its historical effective value 0.60;
+it is not silently converted into a calibrated-v2 policy document.
 
 **Where the time goes.** Profiled on `example_7a61_hg19_subset.bam`:
 `select_illumina_reads` was 196.3 s of a 197 s run — **99.7 %**. It calls `hmm.viterbi`
@@ -123,9 +136,9 @@ New files must be under **650 LOC**. The files below have explicit ceilings and 
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1176 |
+| `advntr/vntr_finder.py` | 1141 |
 | `hmm/hmm.pyx` | 693 |
-| `advntr/hmm_utils.py` | 575 |
+| `advntr/hmm_utils.py` | 569 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
 
 `pomegranate/` is excluded: not compiled, not maintained.

@@ -315,17 +315,11 @@ def get_number_of_repeat_bp_matches_in_vpath(vpath):
 
 
 def update_number_of_repeat_bp_matches_in_vpath_for_each_hmm(visited_states, ru_bp_dictionary, full_repeat_start,
-                                                             full_repeat_end):
-    hmm_id = 0
-    start = 0
-    end = len(visited_states)
-    if settings.USE_ONLY_FULLY_COVERED_RU:  # Only update the regions fully span repeat units
-        start = full_repeat_start
-        end = full_repeat_end
-    for i in range(start, end):
-        hmm_id = visited_states[i].split("_")[-1]
-        if is_matching_state(visited_states[i]) and not visited_states[i].endswith('fix'):
-            ru_bp_dictionary[hmm_id] += 1
+                                                             full_repeat_end, fully_covered=None):
+    from advntr.read_eligibility import update_repeat_coverage
+    full = settings.USE_ONLY_FULLY_COVERED_RU if fully_covered is None else fully_covered
+    update_repeat_coverage(visited_states, ru_bp_dictionary, full_repeat_start,
+                           full_repeat_end, full, is_matching_state)
 
 
 def update_match_count_for_each_hmm(vpath, match_count_dictionary):

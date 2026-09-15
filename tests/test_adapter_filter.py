@@ -475,7 +475,7 @@ class TestAdapterFilter(unittest.TestCase):
                 )
                 with self.assertRaises(SystemExit) as cm:
                     genotype(args, genotype_parser)
-                self.assertIn('--min-read-match-ratio must be a finite float between 0.0 and 1.0', str(cm.exception))
+                self.assertIn('minimum_read_match_ratio must be a finite nonnegative float <= 1.0', str(cm.exception))
         finally:
             settings.FILTER_ADAPTER_READTHROUGH = orig_filter
             settings.MIN_READ_MATCH_RATIO = orig_ratio

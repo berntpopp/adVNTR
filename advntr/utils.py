@@ -17,25 +17,12 @@ def get_gc_content(s):
     return float(res) / len(s)
 
 
-def is_low_quality_read(read):
-    if read.mapq <= MAPQ_CUTOFF:
-        logging.debug('Rejecting read for poor mapping quality')
-        return True
-    low_quality_base_pairs = [i for i, q in enumerate(read.query_qualities) if q < QUALITY_SCORE_CUTOFF]
-    if len(low_quality_base_pairs) >= LOW_QUALITY_BP_TO_DISCARD_READ * len(read.query_qualities):
-        logging.debug('Rejecting read for having so many low quality base pairs')
-        return True
-    maximum_low_quality_run = int(LOW_QUALITY_BP_TO_DISCARD_READ * len(read.query_qualities) / 4)
-    for i in low_quality_base_pairs:
-        passed = False
-        for j in range(i+1, i+maximum_low_quality_run):
-            if j not in low_quality_base_pairs:
-                passed = True
-                break
-        if not passed:
-            logging.debug('Rejecting read for having long run of low quality base pairs')
-            return True
-    return False
+def is_low_quality_read(read, capture_policy=None):
+    from advntr.read_eligibility import is_low_quality_read as evaluate
+    if capture_policy is None:
+        return evaluate(read, MAPQ_CUTOFF, QUALITY_SCORE_CUTOFF, LOW_QUALITY_BP_TO_DISCARD_READ)
+    return evaluate(read, capture_policy.mapq_cutoff, capture_policy.base_quality_cutoff,
+                    capture_policy.maximum_low_quality_fraction)
 
 
 def get_chromosome_reference_sequence(chromosome):

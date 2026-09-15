@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import sys
 
@@ -9,7 +8,7 @@ from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.models import load_unique_vntrs_data, get_largest_id_in_database, save_reference_vntr_to_database
 from advntr.models import delete_vntr_from_database, create_vntrs_database
 from advntr import frameshift_background
-from advntr.frameshift_decisions import resolve_policy
+from advntr.run_context import RunContext, command_policies
 from advntr.reference_vntr import ReferenceVNTR
 from advntr.vntr_finder import VNTRFinder
 from advntr import settings
@@ -70,42 +69,11 @@ def genotype(args, genotype_parser):
         print_error(genotype_parser, 'No input specified. Please specify alignment file or fasta file')
 
     try:
-        frameshift_policy = resolve_policy(
-            getattr(args, 'frameshift_pvalue_cutoff', None),
-            getattr(args, 'min_frameshift_read_support', None))
+        capture_policy, frameshift_policy = command_policies(args)
     except ValueError as error:
         print_error(genotype_parser, str(error))
 
-    if args.nanopore:
-        settings.MAX_ERROR_RATE = 0.3
-    elif args.pacbio:
-        settings.MAX_ERROR_RATE = 0.3
-    else:
-        settings.MAX_ERROR_RATE = 0.05
-
-    if args.threads < 1:
-        print_error(genotype_parser, 'threads cannot be less than 1')
-    if getattr(args, 'rare_unit_coverage_guard', None) is not None:
-        val = args.rare_unit_coverage_guard
-        if math.isnan(val) or math.isinf(val) or val < 0.0:
-            print_error(genotype_parser, '--rare-unit-coverage-guard must be a finite non-negative float')
-    if getattr(args, 'min_read_match_ratio', None) is not None:
-        val = args.min_read_match_ratio
-        if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
-            print_error(genotype_parser, '--min-read-match-ratio must be a finite float between 0.0 and 1.0')
-
-    settings.CORES = args.threads
-    settings.PRUNE_REVERSE_DECODE = args.prune_reverse
-    settings.EXACT_FRAMESHIFT_CALLER = args.exact_frameshift_caller
-    settings.FRAMESHIFT_BACKGROUND_FILE = args.frameshift_background
-    if getattr(args, 'rare_unit_coverage_guard', None) is not None:
-        settings.MIN_RELATIVE_RU_COVERAGE = args.rare_unit_coverage_guard
-    settings.FILTER_ADAPTER_READTHROUGH = getattr(args, 'filter_adapter_readthrough', False)
-    if getattr(args, 'min_read_match_ratio', None) is not None:
-        settings.MIN_READ_MATCH_RATIO = args.min_read_match_ratio
-    # Deliberately not gated on --exact-frameshift-caller: the capture that estimates a
-    # background must run with the caller OFF, or it perturbs the calls it is measuring.
-    settings.FRAMESHIFT_CALIBRATION_OUT = args.frameshift_calibration_out
+    background = None
     if args.frameshift_calibration_out:
         # Same reason as the background preflight below: the only other check is inside
         # `finalise`, which runs after `select_illumina_reads` has decoded every read, so
@@ -130,7 +98,7 @@ def genotype(args, genotype_parser):
         # (advntr/vntr_finder.py:977-978), so a path that exists but does not validate
         # would otherwise cost a full read-selection pass before failing.
         try:
-            frameshift_background.load_background_model(args.frameshift_background)
+            background = frameshift_background.load_background_model(args.frameshift_background)
         except frameshift_background.BackgroundModelError as error:
             print_error(genotype_parser, str(error))
 
@@ -162,6 +130,9 @@ def genotype(args, genotype_parser):
     else:
         logging.basicConfig(format=log_format, filename=log_file, level=logging.DEBUG, filemode='w')
 
+    if background is not None:
+        logging.info(background.describe())
+
     if args.outfile:
         sys.stdout = open(args.outfile, 'w')
 
@@ -170,8 +141,8 @@ def genotype(args, genotype_parser):
         models_file = settings.ILLUMINA_DEFAULT_MODELS_FILE
         if args.pacbio:
             models_file = settings.PACBIO_DEFAULT_MODELS_FILE
-    settings.TRAINED_MODELS_DB = models_file
-    settings.TRAINED_HMMS_DIR = os.path.dirname(os.path.realpath(settings.TRAINED_MODELS_DB)) + '/'
+    run_context = RunContext(capture_policy, frameshift_policy, background,
+                             args.frameshift_calibration_out, models_file)
 
     target_vids = []
     if args.vntr_id is not None:
@@ -182,15 +153,12 @@ def genotype(args, genotype_parser):
                 vid = int(line.strip())
                 if vid not in processed_vids:
                     target_vids.append(vid)
-    reference_vntrs = load_unique_vntrs_data(target_vids=target_vids)
+    reference_vntrs = load_unique_vntrs_data(db_file=run_context.model_path, target_vids=target_vids)
 
     logging.info('Running adVNTR for %s VNTRs' % len(target_vids))
     genome_analyzier = GenomeAnalyzer(reference_vntrs, target_vids, working_directory, args.outfmt, args.haploid,
                                       args.reference_filename, input_file, args.frameshift,
-                                      frameshift_policy=frameshift_policy)
-
-    if args.min_read_length is not None:
-        settings.MIN_READ_LENGTH = args.min_read_length
+                                      run_context=run_context)
 
     if args.pacbio:
         if input_is_alignment_file:
@@ -199,10 +167,6 @@ def genotype(args, genotype_parser):
             genome_analyzier.find_repeat_counts_from_pacbio_reads(input_file, args.naive)
     else:
         if args.frameshift:
-            if args.noref_aln:
-                settings.USE_REF_ALIGNMENT = False
-            if args.fullru:
-                settings.USE_ONLY_FULLY_COVERED_RU = True
             genome_analyzier.find_frameshift_from_alignment_file(input_file)
             if args.aln:
                 from advntr.hmm_alignment import generate_aln

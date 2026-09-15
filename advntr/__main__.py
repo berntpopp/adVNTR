@@ -6,6 +6,7 @@ import sys
 
 from advntr.advntr_commands import genotype, view_model, add_model, del_model
 from advntr import background_fit_command, capabilities
+from advntr.calibration_arguments import validate_genotype_arguments
 from advntr import settings
 from advntr import __version__
 
@@ -200,6 +201,8 @@ def main():
         'capabilities', description='Report installed build identity and supported features')
     capability_parser.add_argument('--json', action='store_true', help='emit the versioned JSON capability contract')
 
+    if sys.argv[1:2] == ['genotype']:
+        validate_genotype_arguments(genotype_parser, sys.argv[2:])
     args = parser.parse_args()
     if args.command == 'genotype':
         genotype(args, genotype_parser)

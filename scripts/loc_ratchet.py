@@ -28,10 +28,12 @@ GRANDFATHERED = {
     # wire in adapter filtering, compound event rejection and cluster validation: 1211 -> 1184.
     # Run-local frameshift policy extracts decisions and condenses their shared docstring: 1184 -> 1183.
     # Shared statistic result ABI extracts the inherited numerical formula: 1183 -> 1176.
-    'advntr/vntr_finder.py': 1176,
+    # Run context propagation extracts finder HMM construction: 1176 -> 1141.
+    'advntr/vntr_finder.py': 1141,
     'hmm/hmm.pyx': 693,
     # Extract the working model constructors; retain the funded ceiling: 900 -> 575.
-    'advntr/hmm_utils.py': 575,
+    # Explicit read-coverage gate extraction: 575 -> 569.
+    'advntr/hmm_utils.py': 569,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
     # each `include` this file, so it is hand-maintained exactly like hmm.pyx is, and
     # was invisible to this ratchet before this entry -- .pxi was not a checked

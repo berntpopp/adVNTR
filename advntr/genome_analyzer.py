@@ -6,12 +6,11 @@ from Bio.SeqRecord import SeqRecord
 from advntr.profiler import time_usage
 from advntr.sam_utils import extract_unmapped_reads_to_fasta_file
 from advntr.vntr_finder import VNTRFinder
-from advntr import settings
-from advntr.frameshift_decisions import resolve_policy, validate_policy
+from advntr.run_context import bind_owner
 
 class GenomeAnalyzer:
     def __init__(self, ref_vntrs, target_vntr_ids, working_dir='./', outfmt='text', is_haploid=False, ref_filename=None,
-                 input_file=None, is_frameshift_mode=False, frameshift_policy=None):
+                 input_file=None, is_frameshift_mode=False, frameshift_policy=None, run_context=None):
         self.reference_vntrs = ref_vntrs
         self.target_vntr_ids = target_vntr_ids
         self.working_dir = working_dir
@@ -19,15 +18,14 @@ class GenomeAnalyzer:
         self.is_haploid = is_haploid
         self.ref_filename = ref_filename
         self.input_file = input_file
-        self.frameshift_policy = (resolve_policy() if frameshift_policy is None
-                                  else validate_policy(frameshift_policy))
+        self.frameshift_policy = bind_owner(self, run_context, frameshift_policy, is_haploid, is_frameshift_mode)
 
         self.vntr_finder = {}
         for ref_vntr in self.reference_vntrs:
             if ref_vntr.id in target_vntr_ids:
                 self.vntr_finder[ref_vntr.id] = VNTRFinder(
                     ref_vntr, is_haploid, ref_filename, is_frameshift_mode,
-                    frameshift_policy=self.frameshift_policy)
+                    frameshift_policy=self.frameshift_policy, run_context=self.run_context)
 
     def print_genotype(self, vntr_id, genotype_result):
         if self.outfmt == 'bed':

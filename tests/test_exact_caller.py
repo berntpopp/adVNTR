@@ -350,19 +350,17 @@ class TestTheFlagIsWiredLikePruneReverse(_ExactCallerTestCase):
         self.assertIsNotNone(keywords)
         self.assertIsNone(ast.literal_eval(keywords['default']))
 
-    def test_genotype_writes_both_settings_from_args(self):
-        """The same one-line shape as `advntr/advntr_commands.py:75`."""
+    def test_genotype_has_no_policy_global_writes(self):
         with open(advntr_commands.__file__.rstrip('c')) as handle:
             tree = ast.parse(handle.read())
-        assignments = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute):
-                target = node.targets[0]
-                if isinstance(target, ast.Attribute):
-                    assignments.add((target.attr, node.value.attr))
-
-        self.assertIn(('EXACT_FRAMESHIFT_CALLER', 'exact_frameshift_caller'), assignments)
-        self.assertIn(('FRAMESHIFT_BACKGROUND_FILE', 'frameshift_background'), assignments)
+        genotype = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'genotype')
+        for node in ast.walk(genotype):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    self.assertFalse(isinstance(target, ast.Attribute)
+                                     and isinstance(target.value, ast.Name)
+                                     and target.value.id == 'settings')
 
     def test_with_the_flag_off_no_background_is_loaded(self):
         settings.FRAMESHIFT_BACKGROUND_FILE = self._write_background()
@@ -529,6 +527,7 @@ class TestTheStartupCheckDoesNotWaitForReadSelection(_ExactCallerTestCase):
         threads = 1
         prune_reverse = False
         exact_frameshift_caller = True
+        frameshift = True
         frameshift_background = None
         #: The calibration capture is independent of this flag and off here, so these
         #: startup tests exercise the background refusal alone.
