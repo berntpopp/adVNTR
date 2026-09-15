@@ -10,6 +10,9 @@ import tempfile
 import unittest
 import zipfile
 
+from tests.test_frameshift_capture_record import capture_document as complete_capture_document
+from tests.test_frameshift_replay_policy import replay_policy
+
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPECTED_OUTPUTS = (
@@ -84,6 +87,31 @@ def _write_inputs(root, zero_control_opportunities=False):
             json.dump({'data_rows': 0}, handle)
         with open(os.path.join(work, 'log_%s.bam.log' % sample_id), 'w') as handle:
             handle.write('INFO:Using read length 1\nINFO:RU1 A\n')
+    labels = os.path.join(root, 'labels.json')
+    with open(labels, 'w') as handle:
+        json.dump({'samples': records}, handle)
+    return labels
+
+
+def _write_v2_inputs(root, producer):
+    records = []
+    specifications = (
+        ('control-a', False, 'pair-a'),
+        ('carrier-a', True, 'pair-a'),
+        ('control-b', False, 'pair-b'),
+        ('carrier-b', True, 'pair-b'),
+    )
+    for sample_id, truth, pair_id in specifications:
+        records.append({'sample_id': sample_id, 'truth': truth,
+                        'partition': 'calibration', 'pair_id': pair_id,
+                        'variant_class': 'negative' if not truth else 'compound',
+                        'array_length': 30})
+        output = os.path.join(root, 'runs', sample_id, 'output')
+        os.makedirs(output)
+        document = complete_capture_document()
+        document['producer'] = dict(producer)
+        with open(os.path.join(output, 'calibration.jsonl'), 'w') as handle:
+            handle.write(json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n')
     labels = os.path.join(root, 'labels.json')
     with open(labels, 'w') as handle:
         json.dump({'samples': records}, handle)
@@ -169,6 +197,11 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
             '--insert-lengths', '1',
         ]
 
+    def _installed_capabilities(self, site, execution):
+        return json.loads(subprocess.check_output(
+            [sys.executable, '-m', 'advntr', 'capabilities', '--json'],
+            cwd=execution, env=self._environment(site)))
+
     def test_installed_capabilities_bind_clean_source_and_actual_package_bytes(self):
         from advntr.capabilities import canonical_bytes, payload_build_id, payload_manifest
         for name, site in self.installations:
@@ -182,10 +215,64 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
                 identity = json.load(handle)
             source_digest = hashlib.sha256(canonical_bytes(identity['source'])).hexdigest()
             self.assertEqual(payload_build_id(payload_manifest(site), source_digest), document['build_id'])
-            self.assertEqual([], document['policy_schema_versions'])
-            self.assertEqual([1], document['capture_schema_versions'])
+            self.assertEqual([1, 2], document['capture_schema_versions'])
+            self.assertEqual([
+                'advntr-frameshift-policy-v1',
+                'advntr-frameshift-replay-policy-v1',
+            ], document['policy_schema_versions'])
+            self.assertIn('frameshift-calibration-capture-v2', document['capabilities'])
+            self.assertIn('frameshift-replay-v1', document['capabilities'])
             self.assertNotIn(self.tempdir, output)
             self.assertTrue(os.path.isfile(os.path.join(site, 'advntr', '_build_identity.json')))
+
+    def test_wheel_and_sdist_run_v2_replay_and_fit_outside_the_checkout(self):
+        for name, site in self.installations:
+            execution = tempfile.mkdtemp(prefix='advntr-v2-execution-', dir=self.tempdir)
+            capabilities = self._installed_capabilities(site, execution)
+            producer = dict((key, capabilities[key])
+                            for key in ('package_version', 'build_id', 'source_revision'))
+
+            capture_root = os.path.join(execution, 'replay captures')
+            os.makedirs(capture_root)
+            capture = complete_capture_document()
+            capture['producer'] = dict(producer)
+            capture_bytes = json.dumps(capture, sort_keys=True, separators=(',', ':')) + '\n'
+            capture_name = 'invented capture.jsonl'
+            with open(os.path.join(capture_root, capture_name), 'w') as handle:
+                handle.write(capture_bytes)
+            manifest = os.path.join(execution, 'manifest.json')
+            with open(manifest, 'w') as handle:
+                json.dump({
+                    'schema_version': 'advntr-frameshift-replay-manifest-v1',
+                    'captures': [{
+                        'key': 'invented', 'filename': capture_name,
+                        'sha256': hashlib.sha256(capture_bytes).hexdigest(), 'vntr_ids': [17],
+                    }],
+                }, handle)
+            policy = os.path.join(execution, 'policy.json')
+            with open(policy, 'w') as handle:
+                json.dump(replay_policy(support=5), handle)
+            replay_output = os.path.join(execution, 'replay output')
+            subprocess.check_call([
+                sys.executable, '-m', 'advntr', 'replay-frameshift',
+                '--capture-root', capture_root, '--manifest', manifest,
+                '--policy', policy, '--output', replay_output,
+            ], cwd=execution, env=self._environment(site))
+            replay = json.load(open(os.path.join(replay_output, 'replay.json')))
+            result = replay['results'][0]['vntrs'][0]['result']
+            self.assertTrue(result['baseline_parity'], name)
+            self.assertEqual([], result['calls'], name)
+            self.assertEqual(producer, replay['replay_producer'], name)
+
+            fit_root = os.path.join(execution, 'fit captures')
+            labels = _write_v2_inputs(fit_root, producer)
+            fit_output = os.path.join(execution, 'fit output')
+            subprocess.check_call(
+                self._command(fit_root, labels, fit_output), cwd=execution,
+                env=self._environment(site))
+            sidecar = json.load(open(os.path.join(fit_output, 'installed.sidecar.json')))
+            self.assertEqual('recipe-v1', sidecar['background_recipe_id'], name)
+            self.assertEqual(producer, sidecar['capture_identity']['producer'], name)
 
     def test_wheel_and_sdist_run_the_fitter_outside_the_checkout(self):
         for name, site in self.installations:

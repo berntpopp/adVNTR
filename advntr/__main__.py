@@ -5,7 +5,7 @@ import argparse
 import sys
 
 from advntr.advntr_commands import genotype, view_model, add_model, del_model
-from advntr import background_fit_command, capabilities
+from advntr import background_fit_command, capabilities, frameshift_replay_command
 from advntr.calibration_arguments import validate_genotype_arguments
 from advntr import settings
 from advntr import __version__
@@ -31,6 +31,7 @@ def main():
     help = 'Command: genotype\tfind RU counts and mutations in VNTRs\n' \
            '         capabilities\tshow installed build identity and features\n' \
            '         fit-background\tfit background null model from calibration sinks\n' \
+           '         replay-frameshift\treplay complete frameshift capture evidence\n' \
            '         viewmodel\tview existing models in database\n' \
            '         addmodel\tadd custom VNTR to the database\n' \
            '         delmodel\tremove a model from database\n'
@@ -122,6 +123,8 @@ def main():
                                        metavar='<int>', default=None,
                                        help='minimum supporting read count for a '
                                             'frameshift candidate (default: 3)')
+    genotype_others_group.add_argument('--frameshift-capture-version', type=int, choices=(1, 2), default=1,
+                                       help='calibration capture ABI (default: 1); v2 requires frameshift and a sink')
     genotype_others_group.add_argument('--frameshift-calibration-out', type=str, metavar='<file>', default=None,
                                        help='append one JSON Lines record per VNTR with '
                                             'the frameshift candidate rows and the span '
@@ -197,12 +200,21 @@ def main():
         description='Fit background null model from calibration sinks')
     background_fit_command.add_fit_background_arguments(fit_parser)
 
+    replay_parser = subparsers.add_parser(
+        'replay-frameshift', usage='advntr replay-frameshift [options]',
+        description='Replay complete frameshift capture evidence')
+    frameshift_replay_command.add_replay_arguments(replay_parser)
+
     capability_parser = subparsers.add_parser(
         'capabilities', description='Report installed build identity and supported features')
     capability_parser.add_argument('--json', action='store_true', help='emit the versioned JSON capability contract')
 
     if sys.argv[1:2] == ['genotype']:
         validate_genotype_arguments(genotype_parser, sys.argv[2:])
+    elif sys.argv[1:2] == ['fit-background']:
+        background_fit_command.validate_fit_arguments(fit_parser, sys.argv[2:])
+    elif sys.argv[1:2] == ['replay-frameshift']:
+        frameshift_replay_command.validate_replay_arguments(replay_parser, sys.argv[2:])
     args = parser.parse_args()
     if args.command == 'genotype':
         genotype(args, genotype_parser)
@@ -216,6 +228,8 @@ def main():
         sys.stdout.write(capabilities.canonical_bytes(document) + '\n')
     elif args.command == 'fit-background':
         sys.exit(background_fit_command.run(args))
+    elif args.command == 'replay-frameshift':
+        sys.exit(frameshift_replay_command.run(args))
     elif args.command == 'viewmodel':
         view_model(args, viewmodel_parser)
     elif args.command == 'addmodel':
