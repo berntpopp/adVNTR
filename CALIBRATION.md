@@ -98,6 +98,10 @@ advntr fit-background --capture-root study --labels labels.json \
 The existing layout is `study/runs/<sample_id>/output/calibration.jsonl`.
 Labels have a top-level `samples` list; selected records require `sample_id`,
 boolean `truth`, `partition`, `pair_id`, `variant_class`, and `array_length`.
+Use JSON `null` for an unknown `array_length`; known lengths must be non-negative
+integers. Length is diagnostic metadata only: it does not enter the background
+estimator or fold assignment. Reports retain unknown lengths in a separate null
+stratum; controllers must not substitute zero or a reference length.
 Only the named partition is read. Controllers must stage only authorized data.
 
 V2 fitting accepts one completed locus per observation and requires matching

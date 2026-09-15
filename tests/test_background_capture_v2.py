@@ -135,7 +135,7 @@ class TestBackgroundCaptureV2(unittest.TestCase):
             with open(os.path.join(output, 'calibration.jsonl'), 'w') as handle:
                 handle.write(json.dumps(dict(capture_document(), producer=producer)) + '\n')
             records.append({'sample_id': name, 'truth': truth, 'pair_id': group, 'partition': 'training',
-                            'variant_class': 'invented' if truth else 'negative', 'array_length': 30})
+                            'variant_class': 'invented' if truth else 'negative', 'array_length': None})
         labels = os.path.join(self.root, 'labels.json')
         with open(labels, 'w') as handle:
             json.dump({'samples': records}, handle)
@@ -159,8 +159,24 @@ class TestBackgroundCaptureV2(unittest.TestCase):
         with open(os.path.join(output, 'invented.cv.json')) as handle:
             cv = json.load(handle)
         self.assertEqual(2, cv['fold_count'])
+        self.assertEqual([None], [row['value'] for row in cv['accuracy_bench_report']['strata']['array_length']])
         self.assertTrue(all(fold['diagnostic_policy'] == policy for fold in cv['folds']))
         self.assertTrue(all(not call for fold in cv['folds'] for call in fold['calls'].values()))
+        # Diagnostic annotation must not change the fitted null or held-out calls.
+        with open(os.path.join(output, 'invented.background.json')) as handle:
+            unknown_background = json.load(handle)
+        with open(labels, 'w') as handle:
+            json.dump({'samples': [dict(record, array_length=30) for record in records]}, handle)
+        args.out_dir = os.path.join(self.root, 'known-length-fit')
+        self.assertEqual(0, run(args))
+        with open(os.path.join(args.out_dir, 'invented.background.json')) as handle:
+            known_background = json.load(handle)
+        for key in ('states', 'default_probability'):
+            self.assertEqual(unknown_background[key], known_background[key])
+        with open(os.path.join(args.out_dir, 'invented.cv.json')) as handle:
+            known_cv = json.load(handle)
+        self.assertEqual(cv['accuracy_bench_report']['metrics'], known_cv['accuracy_bench_report']['metrics'])
+        self.assertEqual(cv['folds'], known_cv['folds'])
         from advntr.background_fit_command import ingest
         from advntr.background_estimator import FitterError
         duplicated = copy.deepcopy(records)

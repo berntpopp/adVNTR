@@ -31,6 +31,32 @@ def _records():
 
 class TestSharedEvaluator(unittest.TestCase):
 
+    def test_unknown_lengths_remain_null_without_changing_accuracy(self):
+        records = _records()
+        expected = background_evaluation.build_report(records, compare=True)
+        records[0]['array_length'] = None
+        records[3]['array_length'] = None
+        report = background_evaluation.build_report(records, compare=True)
+        self.assertEqual(expected['metrics'], report['metrics'])
+        self.assertEqual(expected['comparison']['decision'], report['comparison']['decision'])
+        self.assertEqual([31, 32, None],
+                         [item['value'] for item in report['strata']['array_length']])
+        self.assertEqual(2, report['strata']['array_length'][-1]['n'])
+        self.assertIsNone(report['comparison']['discordances'][0]['array_length'])
+        for record in records:
+            record['array_length'] = None
+        report = background_evaluation.build_report(records, compare=True)
+        self.assertEqual(1, len(report['strata']['array_length']))
+        self.assertIsNone(report['strata']['array_length'][0]['value'])
+        self.assertEqual(4, report['strata']['array_length'][0]['n'])
+
+    def test_only_null_or_nonnegative_integer_lengths_are_accepted(self):
+        for invalid in (True, False, 1.5, 'unknown', -1):
+            records = _records()
+            records[0]['array_length'] = invalid
+            with self.assertRaises((TypeError, ValueError)):
+                background_evaluation.build_report(records, compare=True)
+
     def test_benchmark_uses_the_packaged_evaluator(self):
         self.assertIs(accuracy_bench.build_report,
                       background_evaluation.build_report)

@@ -110,7 +110,8 @@ def _validate_records(records, compare):
             raise ValueError('record %s variant_class must be a non-empty string'
                              % sample_id)
         array_length = record['array_length']
-        _validate_count('record %s array_length' % sample_id, array_length)
+        if array_length is not None:
+            _validate_count('record %s array_length' % sample_id, array_length)
         validated.append(record)
 
     carrier_count = sum(1 for record in validated if record['truth'])
@@ -168,7 +169,9 @@ def _metrics_by_caller(records, compare, mark_interpretation=False):
 
 
 def _stratify(records, field, compare):
-    values = sorted(set(record[field] for record in records))
+    # Missing diagnostic lengths are retained, never imputed into a numeric stratum.
+    values = sorted(set(record[field] for record in records),
+                    key=lambda value: (value is None, value))
     result = []
     for value in values:
         members = [record for record in records if record[field] == value]

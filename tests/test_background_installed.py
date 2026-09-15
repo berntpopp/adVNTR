@@ -105,7 +105,7 @@ def _write_v2_inputs(root, producer):
         records.append({'sample_id': sample_id, 'truth': truth,
                         'partition': 'calibration', 'pair_id': pair_id,
                         'variant_class': 'negative' if not truth else 'compound',
-                        'array_length': 30})
+                        'array_length': None})
         output = os.path.join(root, 'runs', sample_id, 'output')
         os.makedirs(output)
         document = complete_capture_document()
@@ -273,6 +273,8 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
             sidecar = json.load(open(os.path.join(fit_output, 'installed.sidecar.json')))
             self.assertEqual('recipe-v1', sidecar['background_recipe_id'], name)
             self.assertEqual(producer, sidecar['capture_identity']['producer'], name)
+            cv = json.load(open(os.path.join(fit_output, 'installed.cv.json')))
+            self.assertEqual([None], [row['value'] for row in cv['accuracy_bench_report']['strata']['array_length']], name)
 
     def test_wheel_and_sdist_run_the_fitter_outside_the_checkout(self):
         for name, site in self.installations:
