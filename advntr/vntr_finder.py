@@ -9,9 +9,10 @@ import pysam
 from Bio import SeqIO, pairwise2
 from Bio.Seq import Seq
 
-from advntr import (adapter_filter, callable_cluster, coverage_guard,
+from advntr import (adapter_filter, callable_cluster,
                     exact_caller, frameshift_decisions, frameshift_statistics, read_selection,
                     repeat_order, settings)
+from advntr.frameshift_calling import call_frameshift_candidates
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.finder_hmm import FinderHMM
 from advntr.run_context import bind_owner, runtime_value
@@ -72,6 +73,9 @@ class VNTRFinder(FinderHMM):
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
         self.last_frameshift_opportunities = {}
+        self.last_frameshift_traversal = None
+        self.last_frameshift_boundaries = None
+        self.last_frameshift_visits = ()
 
     def get_copies_for_hmm(self, read_length):
         return int(round(float(read_length) / len(self.reference_vntr.pattern) + 0.5))
@@ -158,6 +162,9 @@ class VNTRFinder(FinderHMM):
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
         self.last_frameshift_opportunities = {}
+        self.last_frameshift_traversal = None
+        self.last_frameshift_boundaries = None
+        self.last_frameshift_visits = ()
         mutations = defaultdict(int)
         prefix_suffix_mutations = defaultdict(int)
         candidate_evidence = defaultdict(list)
@@ -376,112 +383,9 @@ class VNTRFinder(FinderHMM):
 
         self.last_frameshift_evidence = dict((state, tuple(evidence)) for state, evidence in candidate_evidence.items())
         self.last_frameshift_opportunities = opportunities.finalise(mutations, prefix_suffix_mutations, ru_bp_coverage)
-        sorted_mutations = sorted(mutations.items(), key=lambda item: (item[1], item[0]))
-        logging.debug('sorted mutations: %s ' % sorted_mutations)
-
-        frameshifts = []
-
-        def decide_and_record(candidate, count, repeat_unit_index, log_id):
-            """The three decision sites' shared body: coverage, then the p-value, then the call.
-
-            They differ in repeat-unit index, count, and log prefix (`'VID'` at the first
-            two, `'ID'` at the third). Division stays left-associated because it is not
-            guaranteed bit-identical to `x / (a * b * c)`, and MeanCoverage is printed.
-            """
-            ru_length = hmm_match_count[repeat_unit_index]
-            total_bps_in_ru = ru_bp_coverage[repeat_unit_index]
-            logging.info('Observed repeating base pairs in RU: %s' % total_bps_in_ru)
-            if self.is_haploid:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / estimated_ru_count[repeat_unit_index]
-                expected_indel_transitions = 0.99 / estimated_ru_count[repeat_unit_index]
-            else:
-                avg_bp_coverage = float(total_bps_in_ru) / ru_length / 2 / estimated_ru_count[repeat_unit_index]
-                expected_indel_transitions = 0.99 / (2 * estimated_ru_count[repeat_unit_index])
-            logging.info('Average coverage for each base pair in RU: %s' % avg_bp_coverage)
-            if coverage_guard.is_rare_unit_coverage_collapsed(
-                    avg_bp_coverage, locus_coverage, runtime_value(self, 'minimum_relative_ru_coverage')):
-                logging.info('Candidate %s skipped: RU%s coverage %.2f collapsed below relative threshold' %
-                             (candidate, repeat_unit_index, avg_bp_coverage))
-                return
-            if background is None:
-                seq_err_prob, frameshift_prob, pval = self.identify_frameshift(
-                    avg_bp_coverage, count, expected_indel_transitions,
-                    error_rate=runtime_value(self, 'legacy_error_rate')
-                )
-                logging.info('Sequencing error prob: %s' % seq_err_prob)
-                logging.info('Frame-shift prob: %s' % frameshift_prob)
-                is_mutation = frameshift_statistics.legacy_result(pval, self.frameshift_policy).called
-            else:
-                is_mutation, pval = exact_caller.decide(self.last_frameshift_opportunities, candidate,
-                                                        background, policy=self.frameshift_policy)
-            logging.info('P-value: %s' % pval)
-            if is_mutation:
-                logging.info(log_id + ':{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
-                frameshifts.append((candidate, count, avg_bp_coverage, pval))
-
-        locus_coverage = coverage_guard.compute_locus_coverage(
-            ru_bp_coverage, hmm_match_count, estimated_ru_count, self.is_haploid)
-
-        for frameshift_candidate in sorted_mutations:
-            state = frameshift_candidate[0]
-            pattern_index = state.split("_")[1] if "&" not in state else state.split("&")[0].split("_")[1]
-            observed_mutation_count = frameshift_candidate[1]
-            logging.info('Frameshift Candidate and Occurrence {}: {}'.format(state, observed_mutation_count))
-            if not frameshift_decisions.passes_support(observed_mutation_count, self.frameshift_policy):
-                logging.info('Skipped due to too small number of occurrence {}: {}'.format(state,
-                                                                                          observed_mutation_count))
-                continue
-            decide_and_record(state, observed_mutation_count, pattern_index, 'VID')
-
-        # Check prefix/suffix boundary conditions
-        repeat_segments = self.reference_vntr.get_repeat_segments()
-        first_repeat_unit_nucleotide = repeat_segments[0][0]
-        last_repeat_unit_nucleotide = repeat_segments[-1][-1]
-
-        read_length = self.hmm.read_length_used_to_build_model
-        suffix_mutation_check_boundary = read_length
-        for i in range(1, len(self.reference_vntr.left_flanking_region)):
-            if self.reference_vntr.left_flanking_region[-i] == first_repeat_unit_nucleotide:
-                suffix_mutation_check_boundary = read_length - i
-            else:
-                break
-
-        prefix_mutation_check_boundary = 0
-        for i in range(len(self.reference_vntr.right_flanking_region)):
-            if self.reference_vntr.right_flanking_region[i] == last_repeat_unit_nucleotide:
-                prefix_mutation_check_boundary = i + 1
-            else:
-                break
-
-        logging.debug('TR region: {}*|{}...{}|*{}'.format(self.reference_vntr.left_flanking_region[-10:],
-                                                          repeat_segments[0],
-                                                          repeat_segments[-1],
-                                                          self.reference_vntr.right_flanking_region[:10]))
-        logging.debug('Suffix boundary {}'.format(suffix_mutation_check_boundary))
-        logging.debug('Prefix boundary {}'.format(prefix_mutation_check_boundary))
-        logging.debug('Prefix and suffix mutations: %s ' % prefix_suffix_mutations)
-
-        for candidate, mutation_count in prefix_suffix_mutations.items():
-            mutation_position = int(candidate.split("_")[0][1:])
-            if 'suffix' in candidate:
-                if mutation_position >= suffix_mutation_check_boundary:
-                    first_repeat_unit_index = reference_repeat_order[1]  # L-target-X-X...-X-R
-                    logging.info('Frameshift Candidate and Occurrence {}: {}'.format(candidate, mutation_count))
-                    if not frameshift_decisions.passes_support(mutation_count, self.frameshift_policy):
-                        logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
-                                                                                                  mutation_count))
-                        continue
-                    decide_and_record(candidate, mutation_count, first_repeat_unit_index, 'VID')
-
-            if 'prefix' in candidate:
-                if mutation_position <= prefix_mutation_check_boundary:  # e.g. I0 is always ok
-                    last_repeat_unit_index = reference_repeat_order[-2]  # L-X-X-X...-target-R
-                    logging.info('Frameshift Candidate and Occurrence {}: {}'.format(candidate, mutation_count))
-                    if not frameshift_decisions.passes_support(mutation_count, self.frameshift_policy):
-                        logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
-                                                                                                  mutation_count))
-                        continue
-                    decide_and_record(candidate, mutation_count, last_repeat_unit_index, 'ID')
+        frameshifts = call_frameshift_candidates(
+            self, mutations, prefix_suffix_mutations, ru_bp_coverage, hmm_match_count,
+            estimated_ru_count, reference_repeat_order, background)
 
         for state, _count, _coverage, _pval in frameshifts:
             evidence = self.last_frameshift_evidence[state]
@@ -902,6 +806,9 @@ class VNTRFinder(FinderHMM):
         self.last_frameshift_context = {}
         self.last_frameshift_evidence = {}
         self.last_frameshift_opportunities = {}
+        self.last_frameshift_traversal = None
+        self.last_frameshift_boundaries = None
+        self.last_frameshift_visits = ()
 
         selected_reads = self.select_illumina_reads(alignment_file, unmapped_filtered_reads)
         return self.find_frameshift_from_selected_reads(selected_reads)

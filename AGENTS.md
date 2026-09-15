@@ -136,7 +136,7 @@ New files must be under **650 LOC**. The files below have explicit ceilings and 
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1141 |
+| `advntr/vntr_finder.py` | 1048 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 569 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |

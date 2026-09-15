@@ -164,3 +164,11 @@ class TestTraversalAgainstProduction(unittest.TestCase):
             plan_visits(freeze_traversal({'D1': 3}, {}), [], 0, 0, resolve_policy())
         with self.assertRaises(ValueError):
             plan_visits(freeze_traversal({}, {'invalid': 3}), [], 0, 0, resolve_policy())
+
+    def test_iterator_preserves_failure_after_earlier_visit_was_reached(self):
+        from advntr.frameshift_traversal import freeze_traversal, iter_visits
+        traversal = freeze_traversal({'D1_1': 3, 'invalid': 4}, {})
+        visits = iter_visits(traversal, [], 0, 0, resolve_policy())
+        self.assertEqual('D1_1', next(visits).state)
+        with self.assertRaises(IndexError):
+            next(visits)

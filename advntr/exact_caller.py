@@ -112,6 +112,7 @@ the returned probability is for the `Pvalue` column and the log line only, and c
 moves the decision, not the rest of the table.
 """
 import logging
+from collections import namedtuple
 
 from advntr.frameshift_background import BackgroundModelError, load_background_model
 from advntr.frameshift_decisions import resolve_policy, validate_policy
@@ -212,11 +213,34 @@ def decide_result(records, state, background, cutoff=None, policy=None):
     if policy is None:
         policy = resolve_policy(cutoff=cutoff)
     validate_policy(policy)
+    assessment = assess_evidence(records, state, background, policy)
+    log_assessment(state, assessment)
+    return assessment.statistic
+
+
+ExactAssessment = namedtuple('ExactAssessment', 'statistic support opportunities probability')
+
+
+def assess_evidence(records, state, background, policy):
+    """Pure shared aggregation/scoring, with no logging or background-file lookup."""
+    validate_policy(policy)
     evidence = aggregate_evidence(records, state)
     if evidence is None:
-        logging.warning('exact caller: no opportunity row for %s; not called', state)
-        return StatisticDecision(False, None, None, 'missing-opportunity-row')
+        return ExactAssessment(StatisticDecision(False, None, None, 'missing-opportunity-row'),
+                               None, None, None)
     support, opportunities = evidence
+    # Invalid trials are refused before asking the background for any probability.
+    probability = None if support > opportunities else background.probability_for(state)
+    return ExactAssessment(exact_result(support, opportunities, probability, policy),
+                           support, opportunities, probability)
+
+
+def log_assessment(state, assessment):
+    """Keep the existing production diagnostics around the pure shared assessment."""
+    if assessment.support is None:
+        logging.warning('exact caller: no opportunity row for %s; not called', state)
+        return
+    support, opportunities = assessment.support, assessment.opportunities
     if support == 0 and opportunities == 0:
         logging.warning('exact caller: %s has neither support nor opportunities: no '
                         'occurrence satisfied every one of its components, so there is '
@@ -232,8 +256,6 @@ def decide_result(records, state, background, cutoff=None, policy=None):
                         'for %s, so at least one attributed occurrence never offered '
                         'every component of it; not called',
                         support, opportunities, state)
-        return exact_result(support, opportunities, None, policy)
-    probability = background.probability_for(state)
+        return
     logging.info('Exact tail inputs: k=%d N=%d p0=%s' % (support, opportunities,
-                                                         probability))
-    return exact_result(support, opportunities, probability, policy)
+                                                         assessment.probability))

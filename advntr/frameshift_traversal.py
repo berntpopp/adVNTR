@@ -85,8 +85,8 @@ def freeze_traversal(mutations, flank_mutations):
                               tuple(flank_mutations.items()))
 
 
-def plan_visits(traversal, reference_order, suffix_min_position, prefix_max_position, policy):
-    """Return ordered production gate visits, without scoring or reading global state.
+def iter_visits(traversal, reference_order, suffix_min_position, prefix_max_position, policy):
+    """Yield ordered production gate visits, without scoring or reading global state.
 
     Boundary equality passes in both branches, with opposite comparisons. The
     borrowed repeat-unit index is read only after the boundary passes, but before
@@ -98,16 +98,18 @@ def plan_visits(traversal, reference_order, suffix_min_position, prefix_max_posi
     validate_policy(policy)
     _integer(suffix_min_position, 'suffix boundary')
     _integer(prefix_max_position, 'prefix boundary', 0)
-    visits = []
+    for ordinal, fields in enumerate(_gate_visits(traversal, reference_order, suffix_min_position,
+                                                  prefix_max_position, policy)):
+        yield VisitPlan(ordinal, *fields)
 
-    def append(source_index, site, state, count, index, disposition):
-        visits.append(VisitPlan(len(visits), source_index, site, state, count, index, disposition))
 
+def _gate_visits(traversal, reference_order, suffix_min_position, prefix_max_position, policy):
+    """Yield one reached gate at a time, retaining source failure and continue order."""
     for source_index, (state, count) in enumerate(traversal.repeat_candidates):
         # Keep the first component's index even for a compound candidate.
         index = state.split('&')[0].split('_')[1]
         disposition = 'ready-to-score' if passes_support(count, policy) else 'insufficient-read-support'
-        append(source_index, 'repeat', state, count, index, disposition)
+        yield (source_index, 'repeat', state, count, index, disposition)
 
     for source_index, (state, count) in enumerate(traversal.flank_candidates):
         position = int(state.split('_')[0][1:])
@@ -115,20 +117,24 @@ def plan_visits(traversal, reference_order, suffix_min_position, prefix_max_posi
             if position >= suffix_min_position:
                 index = reference_order[1]
                 supported = passes_support(count, policy)
-                append(source_index, 'suffix', state, count, index,
+                yield (source_index, 'suffix', state, count, index,
                        'ready-to-score' if supported else 'insufficient-read-support')
                 if not supported:
                     continue
             else:
-                append(source_index, 'suffix', state, count, None, 'outside-boundary')
+                yield (source_index, 'suffix', state, count, None, 'outside-boundary')
         if 'prefix' in state:
             if position <= prefix_max_position:
                 index = reference_order[-2]
                 supported = passes_support(count, policy)
-                append(source_index, 'prefix', state, count, index,
+                yield (source_index, 'prefix', state, count, index,
                        'ready-to-score' if supported else 'insufficient-read-support')
                 if not supported:
                     continue
             else:
-                append(source_index, 'prefix', state, count, None, 'outside-boundary')
-    return tuple(visits)
+                yield (source_index, 'prefix', state, count, None, 'outside-boundary')
+
+
+def plan_visits(traversal, reference_order, suffix_min_position, prefix_max_position, policy):
+    """Freeze all visits when no interleaved production work is required."""
+    return tuple(iter_visits(traversal, reference_order, suffix_min_position, prefix_max_position, policy))
