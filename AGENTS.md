@@ -61,6 +61,10 @@ does not mention muscle in its first line.
 | `advntr genotype -fs -vid 25561 ... --frameshift-calibration-out F.jsonl` | Append one calibration capture record per VNTR. Default-off; changes no call |
 | `advntr fit-background [options]` | Fit, screen, cross-validate, and emit background null model from calibration sinks |
 
+`fit-background` uses the evaluator shipped in `advntr.background_evaluation`.
+The former `--worktree` option is retained only to return a named deprecation error;
+installed fitting never loads or executes a checkout's `scripts/accuracy_bench.py`.
+
 ## Layout
 
 ```

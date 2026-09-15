@@ -178,26 +178,6 @@ def discrimination_ratios(carrier_observations, control_observations, states,
     return ratios
 
 
-def load_accuracy_bench(worktree):
-    """`scripts/accuracy_bench.py` as a module, without writing a byte to the worktree.
-
-    `imp.load_source` would drop a `.pyc` beside the source, i.e. inside the repository,
-    which this task may not touch. Compiling the text into a fresh module namespace has
-    the same effect and writes nothing. `__name__` is not `'__main__'`, so the script's
-    own entry point does not run.
-    """
-    import types
-    path = os.path.join(worktree, 'scripts', 'accuracy_bench.py')
-    if not os.path.isfile(path):
-        raise FitterError('accuracy_bench not found at %s' % path)
-    module = types.ModuleType('advntr_bench_accuracy')
-    module.__file__ = path
-    with open(path) as handle:
-        source = handle.read()
-    exec(compile(source, path, 'exec'), module.__dict__)
-    return module
-
-
 def shuffle_probabilities(probabilities, seed):
     """8b 5.2's label shuffle: permute the state -> rate assignment, nothing else.
 

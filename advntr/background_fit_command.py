@@ -9,6 +9,7 @@ import os
 import sys
 
 from advntr import settings
+from advntr import background_evaluation
 from advntr import background_fitter as bf
 from advntr import background_fit_reports as bfr
 from advntr.frameshift_background import BackgroundModelError, load_background_model
@@ -34,10 +35,9 @@ def add_fit_background_arguments(parser):
     parser.add_argument('--baseline-records', default=None,
                         help='JSONL of baseline calls; without it the baseline call is '
                              'taken from each run\'s result.json data_rows')
-    default_worktree = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser.add_argument('--worktree',
-                        default=default_worktree,
-                        help='read-only: only scripts/accuracy_bench.py is loaded')
+                        default=None,
+                        help='deprecated: the evaluator is shipped with advntr')
     parser.add_argument('--design', default='unstated',
                         help='one line describing the capture design this profile '
                              'reflects')
@@ -295,6 +295,8 @@ def prove_loader_acceptance(artifact_path, document, out_dir):
     return proof
 
 def run(args):
+    if args.worktree is not None:
+        _fail('--worktree is deprecated; fit-background uses the packaged evaluator')
     if bf.SETTINGS_MIN_SUPPORTING_READ_COUNT != settings.MIN_SUPPORTING_READ_COUNT:
         _fail('this fitter assumes MIN_SUPPORTING_READ_COUNT = %d but the shipped '
               'settings say %d' % (bf.SETTINGS_MIN_SUPPORTING_READ_COUNT,
@@ -306,7 +308,7 @@ def run(args):
                  settings.INDEL_MUTATION_MIN_PVALUE))
     if not os.path.isdir(args.out_dir):
         os.makedirs(args.out_dir)
-    bench = bf.load_accuracy_bench(args.worktree)
+    bench = background_evaluation
     hyperparameters, banner, overrides = effective_hyperparameters(args)
 
     labels = bf.load_labels(args.labels, args.partition)
@@ -329,6 +331,10 @@ def run(args):
                             for sample in controls]
     carrier_observations = [bf.CaptureObservation(sample['capture'])
                             for sample in carriers]
+    if not any(observation.evidence(state)[1] > 0
+               for observation in control_observations for state in states):
+        _fail('all control opportunities are zero; there is no observed trial mass '
+              'from which to estimate a background')
 
     fit = bf.fit_background(control_observations, sorted(states), hyperparameters)
     discrimination = bf.discrimination_ratios(carrier_observations,

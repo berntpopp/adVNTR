@@ -1,0 +1,4 @@
+include build_config.py
+include hmm/base.pyx hmm/base.pxd
+include hmm/hmm.pyx hmm/cqueue.pxd hmm/_viterbi_fill_core.pxi
+include hmm/queue.c hmm/queue.h

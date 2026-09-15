@@ -404,28 +404,6 @@ class TestDiscrimination(unittest.TestCase):
         self.assertFalse(ratios['D28_5']['flagged'])
 
 
-class TestAccuracyBenchImport(unittest.TestCase):
-
-    def test_the_shipped_metrics_helpers_import_without_writing_anything(self):
-        """The worktree is READ-ONLY for this task, and `imp.load_source` would drop a
-        `.pyc` inside it. A stale `.pyc` from somebody else's earlier run may already be
-        there (`*.pyc` is gitignored), so the check is that nothing in `scripts/` is
-        created OR modified by the import, not that the directory is bare."""
-        worktree = REPO_ROOT
-        scripts = os.path.join(worktree, 'scripts')
-        if not os.path.isdir(scripts):
-            self.skipTest('worktree not present')
-        before = dict((name, os.stat(os.path.join(scripts, name)).st_mtime)
-                      for name in os.listdir(scripts))
-        bench = bf.load_accuracy_bench(worktree)
-        after = dict((name, os.stat(os.path.join(scripts, name)).st_mtime)
-                     for name in os.listdir(scripts))
-        self.assertTrue(hasattr(bench, 'wilson_ci'))
-        self.assertTrue(hasattr(bench, 'mcnemar_exact'))
-        self.assertTrue(hasattr(bench, 'build_report'))
-        self.assertEqual(before, after)
-
-
 class TestCrossValidation(TempDirTestCase):
     """8b 5.1: 5-fold blocked on `pair_id`, everything refit inside the training fold."""
 
