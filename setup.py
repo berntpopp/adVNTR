@@ -4,11 +4,17 @@
 # rejects with "each element of 'ext_modules' option must be an Extension instance".
 from setuptools import find_packages, setup  # isort: skip
 
+import os
+
 import numpy
 from Cython.Build import cythonize
 
 from advntr import __version__
 from build_config import CYTHON_DIRECTIVES, PRODUCTION_EXTENSION_SOURCES
+from build_identity import build_commands, source_identity
+
+SOURCE_ROOT = os.path.dirname(os.path.abspath(__file__))
+SOURCE_IDENTITY = source_identity(SOURCE_ROOT)
 
 setup(name='advntr',
       version=__version__,
@@ -23,6 +29,8 @@ setup(name='advntr',
                                       'advntr_harness', 'advntr_harness.*',
                                       'scripts', 'scripts.*']),
       package_dir={'advntr': 'advntr'},
+      cmdclass=build_commands(SOURCE_ROOT, SOURCE_IDENTITY),
+      zip_safe=False,
       install_requires=['scipy', 'biopython', 'cython', 'scikit-learn'],
       provides=["advntr"],
       entry_points={
@@ -34,6 +42,7 @@ setup(name='advntr',
             PRODUCTION_EXTENSION_SOURCES,
             compiler_directives=CYTHON_DIRECTIVES,
             nthreads=4,
+            force=True,
       ),
       include_dirs=[numpy.get_include()],
       classifiers=["Environment :: Console",

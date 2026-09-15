@@ -1,4 +1,5 @@
 """Build distributions and run fit-background with no checkout on sys.path."""
+import hashlib
 import json
 import os
 import shutil
@@ -96,6 +97,13 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
         cls.tempdir = tempfile.mkdtemp(prefix='advntr-installed-fit-')
         source = os.path.join(cls.tempdir, 'source')
         shutil.copytree(REPO, source, ignore=_ignore_build_products)
+        subprocess.check_call(['git', 'init', '-q'], cwd=source)
+        subprocess.check_call(['git', 'add', '-A'], cwd=source)
+        subprocess.check_call(['git', '-c', 'user.name=Fixture',
+                               '-c', 'user.email=fixture@example.invalid',
+                               'commit', '-qm', 'synthetic source snapshot'], cwd=source)
+        cls.source_revision = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=source).strip()
         dist = os.path.join(cls.tempdir, 'dist')
         os.makedirs(dist)
         subprocess.check_call(
@@ -160,6 +168,24 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
             '--folds', '2',
             '--insert-lengths', '1',
         ]
+
+    def test_installed_capabilities_bind_clean_source_and_actual_package_bytes(self):
+        from advntr.capabilities import canonical_bytes, payload_build_id, payload_manifest
+        for name, site in self.installations:
+            execution = tempfile.mkdtemp(prefix='advntr-cap-execution-', dir=self.tempdir)
+            output = subprocess.check_output(
+                [sys.executable, '-m', 'advntr', 'capabilities', '--json'],
+                cwd=execution, env=self._environment(site))
+            document = json.loads(output)
+            self.assertEqual(self.source_revision, document['source_revision'], name)
+            with open(os.path.join(site, 'advntr', '_build_identity.json')) as handle:
+                identity = json.load(handle)
+            source_digest = hashlib.sha256(canonical_bytes(identity['source'])).hexdigest()
+            self.assertEqual(payload_build_id(payload_manifest(site), source_digest), document['build_id'])
+            self.assertEqual([], document['policy_schema_versions'])
+            self.assertEqual([1], document['capture_schema_versions'])
+            self.assertNotIn(self.tempdir, output)
+            self.assertTrue(os.path.isfile(os.path.join(site, 'advntr', '_build_identity.json')))
 
     def test_wheel_and_sdist_run_the_fitter_outside_the_checkout(self):
         for name, site in self.installations:

@@ -65,6 +65,29 @@ does not mention muscle in its first line.
 The former `--worktree` option is retained only to return a named deprecation error;
 installed fitting never loads or executes a checkout's `scripts/accuracy_bench.py`.
 
+## Installed capabilities and build identity
+
+`advntr capabilities --json` emits the closed `advntr-capabilities-v1` contract.
+Only the exact `--json` spelling is accepted; duplicates and option abbreviations fail.
+Currently advertised features are installed background fitting, calibration capture v1,
+and run-local frameshift policy. No replay capability or JSON policy schema is claimed.
+The numerical background recipe remains `recipe-v1`.
+
+`build_id` binds all package Python sources and compiled extension bytes, plus the
+canonical source-attestation digest. Caches and generated identity documents are excluded
+from the file manifest, so it cannot hash itself. Different compiled payloads or recorded
+provenance produce different IDs; this does not promise bit-identical compiler outputs.
+Source paths inside metadata are relative and no timestamp or host build path is recorded.
+
+Distribution builds regenerate Cython sources and use a fresh build directory. A clean
+Git revision is retained only after actual build-input bytes match its blobs; Git index
+flags and environment-supplied revision claims are insufficient. An sdist retains that
+source attestation and refuses changed inputs when rebuilt. Installed capability queries
+verify the actual package payload against its metadata. Corrupt present metadata raises;
+missing metadata reports a null revision and is research-only. A clean source checkout
+alone cannot attest that ignored existing binaries were built from HEAD. These are
+integrity checks under a trusted build operator, not artifact signatures.
+
 ## Layout
 
 ```

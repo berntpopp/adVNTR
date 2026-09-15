@@ -1,4 +1,5 @@
-include build_config.py
+include build_config.py build_identity.py
+include _source_identity.json
 include hmm/base.pyx hmm/base.pxd
 include hmm/hmm.pyx hmm/cqueue.pxd hmm/_viterbi_fill_core.pxi
 include hmm/queue.c hmm/queue.h

@@ -5,7 +5,7 @@ import argparse
 import sys
 
 from advntr.advntr_commands import genotype, view_model, add_model, del_model
-from advntr import background_fit_command
+from advntr import background_fit_command, capabilities
 from advntr import settings
 from advntr import __version__
 
@@ -28,6 +28,7 @@ def main():
                   'Instructions: http://advntr.readthedocs.io\n' \
                   '-------------------------------------------------------\n' % __version__
     help = 'Command: genotype\tfind RU counts and mutations in VNTRs\n' \
+           '         capabilities\tshow installed build identity and features\n' \
            '         fit-background\tfit background null model from calibration sinks\n' \
            '         viewmodel\tview existing models in database\n' \
            '         addmodel\tadd custom VNTR to the database\n' \
@@ -195,9 +196,21 @@ def main():
         description='Fit background null model from calibration sinks')
     background_fit_command.add_fit_background_arguments(fit_parser)
 
+    capability_parser = subparsers.add_parser(
+        'capabilities', description='Report installed build identity and supported features')
+    capability_parser.add_argument('--json', action='store_true', help='emit the versioned JSON capability contract')
+
     args = parser.parse_args()
     if args.command == 'genotype':
         genotype(args, genotype_parser)
+    elif args.command == 'capabilities':
+        if sys.argv[2:] != ['--json']:
+            capability_parser.error('capabilities requires exactly --json; prefixes and duplicate options are refused')
+        try:
+            document = capabilities.describe_capabilities()
+        except (ValueError, IOError, OSError) as error:
+            capability_parser.error(str(error))
+        sys.stdout.write(capabilities.canonical_bytes(document) + '\n')
     elif args.command == 'fit-background':
         sys.exit(background_fit_command.run(args))
     elif args.command == 'viewmodel':
