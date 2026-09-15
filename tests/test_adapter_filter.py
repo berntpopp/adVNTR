@@ -7,6 +7,7 @@ import unittest
 import pysam
 
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy
 from advntr.adapter_filter import (
     contains_adapter_kmer,
     count_genuine_matches,
@@ -172,7 +173,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 15
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 1))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()
@@ -214,7 +216,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 15
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 3))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()
@@ -263,7 +266,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 15
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 1))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()
@@ -306,7 +310,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 5 + 'AGATCGGA' + 'ACGT' * 8
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 1))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()
@@ -344,7 +349,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 15
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 1))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()
@@ -384,7 +390,8 @@ class TestAdapterFilter(unittest.TestCase):
         unit = 'ACGT' * 15
         ref = ReferenceVNTR(1, unit, 100, 'chr1', None, None)
         ref.init_from_xml([unit, unit], 'TTTTTTTT', 'GGGGGGGG')
-        finder = VNTRFinder(ref, is_frameshift_mode=True)
+        finder = VNTRFinder(ref, is_frameshift_mode=True,
+                            frameshift_policy=resolve_policy(0.001, 1))
         class HMM(object):
             read_length_used_to_build_model = 151
         finder.hmm = HMM()

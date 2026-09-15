@@ -8,6 +8,7 @@ import unittest
 from cStringIO import StringIO
 
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy
 from advntr.reference_vntr import ReferenceVNTR
 import advntr.vntr_finder as vntr_finder_module
 from advntr.vntr_finder import SelectedRead, VNTRFinder
@@ -105,7 +106,8 @@ class TestFrameshiftOrdering(unittest.TestCase):
 
         reference = ReferenceVNTR(1, 'A' * 50, 100, 'chr1', None, None)
         reference.init_from_xml(['A' * 50, 'A' * 50], 'TTTTTTTTTT', 'GGGGGGGGGG')
-        self.finder = _OrderingFinder(reference)
+        self.finder = _OrderingFinder(
+            reference, frameshift_policy=resolve_policy(0.001, 1))
         self.finder.hmm = _FakeHMM()
 
     def tearDown(self):

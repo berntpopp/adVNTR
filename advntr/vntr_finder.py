@@ -10,7 +10,8 @@ from Bio import SeqIO, pairwise2
 from Bio.Seq import Seq
 
 from advntr import (adapter_filter, callable_cluster, coverage_guard,
-                    exact_caller, read_selection, repeat_order, settings)
+                    exact_caller, frameshift_decisions, read_selection,
+                    repeat_order, settings)
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
 from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
@@ -47,7 +48,8 @@ class SelectedRead:
 class VNTRFinder:
     """Find the VNTR structure of a reference VNTR in NGS data of the donor."""
 
-    def __init__(self, reference_vntr, is_haploid=False, reference_filename=None, is_frameshift_mode=False):
+    def __init__(self, reference_vntr, is_haploid=False, reference_filename=None,
+                 is_frameshift_mode=False, frameshift_policy=None):
         self.reference_vntr = reference_vntr
         self.is_haploid = is_haploid
         self.reference_filename = reference_filename
@@ -61,6 +63,8 @@ class VNTRFinder:
         self.vntr_end = self.reference_vntr.get_genomic_end()
 
         self.is_frameshift_mode = is_frameshift_mode
+        self.frameshift_policy = frameshift_decisions.resolve_policy() if frameshift_policy is None else (
+            frameshift_decisions.validate_policy(frameshift_policy))
         self.hmm = None
         # All replaced each invocation. Evidence and Task 7's shadow (k, N) opportunities
         # cover every eligible candidate; only Context is emitted, called-only, anonymous.
@@ -423,14 +427,9 @@ class VNTRFinder:
         def decide_and_record(candidate, count, repeat_unit_index, log_id):
             """The three decision sites' shared body: coverage, then the p-value, then the call.
 
-            The three differ only in which repeat-unit index they read, which count they
-            pass, and one log prefix -- `log_id` is `'VID'` at the first two sites and
-            `'ID'` at the third, preserved exactly as the third site wrote it. Note the
-            division is left-associated on purpose: `float(x) / a / b / c` is not
+            They differ in repeat-unit index, count, and log prefix (`'VID'` at the first
+            two, `'ID'` at the third). Division stays left-associated because it is not
             guaranteed bit-identical to `x / (a * b * c)`, and MeanCoverage is printed.
-
-            `background` is `None` unless Task 8's default-off `--exact-frameshift-caller`
-            is on, so with the flag off this is byte-for-byte the pre-Task-8 decision.
             """
             ru_length = hmm_match_count[repeat_unit_index]
             total_bps_in_ru = ru_bp_coverage[repeat_unit_index]
@@ -453,10 +452,10 @@ class VNTRFinder:
                 )
                 logging.info('Sequencing error prob: %s' % seq_err_prob)
                 logging.info('Frame-shift prob: %s' % frameshift_prob)
-                is_mutation = pval < settings.INDEL_MUTATION_MIN_PVALUE
+                is_mutation = frameshift_decisions.legacy_call(pval, self.frameshift_policy)
             else:
                 is_mutation, pval = exact_caller.decide(self.last_frameshift_opportunities, candidate,
-                                                        background, settings.INDEL_MUTATION_MIN_PVALUE)
+                                                        background, policy=self.frameshift_policy)
             logging.info('P-value: %s' % pval)
             if is_mutation:
                 logging.info(log_id + ':{}, There is a mutation at {}'.format(self.reference_vntr.id, candidate))
@@ -470,7 +469,7 @@ class VNTRFinder:
             pattern_index = state.split("_")[1] if "&" not in state else state.split("&")[0].split("_")[1]
             observed_mutation_count = frameshift_candidate[1]
             logging.info('Frameshift Candidate and Occurrence {}: {}'.format(state, observed_mutation_count))
-            if observed_mutation_count < settings.MIN_SUPPORTING_READ_COUNT:
+            if not frameshift_decisions.passes_support(observed_mutation_count, self.frameshift_policy):
                 logging.info('Skipped due to too small number of occurrence {}: {}'.format(state,
                                                                                           observed_mutation_count))
                 continue
@@ -510,7 +509,7 @@ class VNTRFinder:
                 if mutation_position >= suffix_mutation_check_boundary:
                     first_repeat_unit_index = reference_repeat_order[1]  # L-target-X-X...-X-R
                     logging.info('Frameshift Candidate and Occurrence {}: {}'.format(candidate, mutation_count))
-                    if mutation_count < settings.MIN_SUPPORTING_READ_COUNT:
+                    if not frameshift_decisions.passes_support(mutation_count, self.frameshift_policy):
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue
@@ -520,7 +519,7 @@ class VNTRFinder:
                 if mutation_position <= prefix_mutation_check_boundary:  # e.g. I0 is always ok
                     last_repeat_unit_index = reference_repeat_order[-2]  # L-X-X-X...-target-R
                     logging.info('Frameshift Candidate and Occurrence {}: {}'.format(candidate, mutation_count))
-                    if mutation_count < settings.MIN_SUPPORTING_READ_COUNT:
+                    if not frameshift_decisions.passes_support(mutation_count, self.frameshift_policy):
                         logging.info('Skipped due to too small number of occurrence {}: {}'.format(candidate,
                                                                                                   mutation_count))
                         continue

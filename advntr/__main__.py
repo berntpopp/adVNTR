@@ -112,6 +112,14 @@ def main():
                                        help='frozen background model for '
                                             '--exact-frameshift-caller; there is no '
                                             'built-in default')
+    genotype_others_group.add_argument('--frameshift-pvalue-cutoff', type=float,
+                                       metavar='<float>', default=None,
+                                       help='strict frameshift p-value cutoff '
+                                            '(default: 0.001)')
+    genotype_others_group.add_argument('--min-frameshift-read-support', type=int,
+                                       metavar='<int>', default=None,
+                                       help='minimum supporting read count for a '
+                                            'frameshift candidate (default: 3)')
     genotype_others_group.add_argument('--frameshift-calibration-out', type=str, metavar='<file>', default=None,
                                        help='append one JSON Lines record per VNTR with '
                                             'the frameshift candidate rows and the span '

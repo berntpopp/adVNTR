@@ -4,6 +4,7 @@ import unittest
 from cStringIO import StringIO
 
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy
 from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.mutation_keys import extract_raw_mutations
 from advntr.reference_vntr import ReferenceVNTR
@@ -130,7 +131,8 @@ class TestFrameshiftContext(unittest.TestCase):
 
         reference = ReferenceVNTR(1, REFERENCE_UNIT, 100, 'chr1', None, None)
         reference.init_from_xml([REFERENCE_UNIT, REFERENCE_UNIT], 'TTTTTTTT', 'GGGGGGGG')
-        self.finder = _CallingFinder(reference)
+        self.finder = _CallingFinder(
+            reference, frameshift_policy=resolve_policy(0.001, 1))
         self.finder.hmm = _FakeHMM()
 
     def tearDown(self):
@@ -240,7 +242,7 @@ class TestFrameshiftContext(unittest.TestCase):
         self.assertEqual(sum(context['read_occurrence_support'] for context in contexts), 2)
 
     def test_subthreshold_candidate_keeps_internal_evidence_but_emits_no_context_row(self):
-        settings.MIN_SUPPORTING_READ_COUNT = 2
+        self.finder.frameshift_policy = resolve_policy(0.001, 2)
         alignment_finder = _AlignmentFinder(self.finder, [_insertion_read('TC', 'subthreshold')])
         analyzer = GenomeAnalyzer([], [])
         analyzer.ref_filename = 'reference.fa'

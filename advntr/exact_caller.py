@@ -93,7 +93,7 @@ for a compound `State` on the same aggregated statistic this function computes.
 
 **Two more divergences a frozen background has to match.**
 
-- Only candidates that already passed `settings.MIN_SUPPORTING_READ_COUNT` and the flank
+- Only candidates that already passed the run-local minimum read support and the flank
   boundary gates reach a decision site (`advntr/vntr_finder.py:475-480`, `:519-521`,
   `:529-531`), so the selection truncation SPEC Q-RATE warns about is still UPSTREAM of
   this statistic. A background estimated over all candidate slots would not be the null
@@ -106,15 +106,16 @@ for a compound `State` on the same aggregated statistic this function computes.
 `p0` is looked up on the emitted `State` string, falling back to the artifact's declared
 default. `State` is byte-identical by SPEC 3.5, which is what makes it a stable key.
 
-The decision is `log_tail < log(cutoff)` against `settings.INDEL_MUTATION_MIN_PVALUE`;
+The decision is `log_tail < log(cutoff)` against the run-local `FrameshiftPolicy.cutoff`;
 the returned probability is for the `Pvalue` column and the log line only, and can be
 `0.0` in the deep tail. The `MeanCoverage` column keeps the legacy quantity: the flag
 moves the decision, not the rest of the table.
 """
 import logging
 
-from advntr.exact_tail import exact_indel_tail, tail_below_cutoff
+from advntr.exact_tail import exact_indel_tail
 from advntr.frameshift_background import BackgroundModelError, load_background_model
+from advntr.frameshift_decisions import exact_call, resolve_policy, validate_policy
 from advntr import settings
 
 
@@ -193,11 +194,18 @@ def aggregate_evidence(records, state):
     return len(identities), own['opportunities']
 
 
-def decide(records, state, background, cutoff):
+def decide(records, state, background, cutoff=None, policy=None):
     """`(called, pvalue)` for one candidate. `pvalue` is `None` when nothing was scored.
 
     `k > N` is reachable here and is refused, never clamped: see the module docstring.
+    The scalar `cutoff` remains accepted for callers of the original public surface;
+    production passes one resolved run-local `policy`. Supplying both is ambiguous.
     """
+    if cutoff is not None and policy is not None:
+        raise ValueError('exact caller accepts cutoff or policy, not both')
+    if policy is None:
+        policy = resolve_policy(cutoff=cutoff)
+    validate_policy(policy)
     evidence = aggregate_evidence(records, state)
     if evidence is None:
         logging.warning('exact caller: no opportunity row for %s; not called', state)
@@ -222,5 +230,5 @@ def decide(records, state, background, cutoff):
     probability = background.probability_for(state)
     logging.info('Exact tail inputs: k=%d N=%d p0=%s' % (support, opportunities,
                                                          probability))
-    return (tail_below_cutoff(support, opportunities, probability, cutoff),
+    return (exact_call(support, opportunities, probability, policy),
             exact_indel_tail(support, opportunities, probability))

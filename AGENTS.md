@@ -100,7 +100,7 @@ you touch one, leave it smaller than you found it:
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
-| `advntr/vntr_finder.py` | 1184 |
+| `advntr/vntr_finder.py` | 1183 |
 | `hmm/hmm.pyx` | 693 |
 | `advntr/hmm_utils.py` | 900 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
@@ -206,6 +206,13 @@ it on, `advntr/exact_caller.py` decides with a one-sided exact binomial
 (`advntr/exact_tail.py`) over Task 7's integer `(k, N)` and a frozen background loaded
 from `--frameshift-background <file>`.
 
+- **Cutoff and read support are run-local.** `--frameshift-pvalue-cutoff` and
+  `--min-frameshift-read-support` resolve once into an immutable
+  `frameshift_decisions.FrameshiftPolicy`, which is passed through `GenomeAnalyzer` to
+  every finder in the run. Defaults remain 0.001 and 3. The support value gates the
+  existing read count before either caller; it is not exact-caller occurrence support.
+  Neither flag mutates `settings`, and the background fitter's recipe-v1 floor/support
+  assumptions remain fixed independently of these runtime choices.
 - **It is not usable without an artifact, by design.** There is no built-in `p0` and
   there must not be one: SPEC Q-RATE shows the public candidate-conditioned rates
   (3.0e-4 pooled, 1.7e-4 median) are conditional on candidates already selected at

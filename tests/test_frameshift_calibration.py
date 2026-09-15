@@ -24,6 +24,7 @@ from advntr import advntr_commands
 from advntr import frameshift_calibration
 from advntr import frameshift_opportunities
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy
 from advntr.reference_vntr import ReferenceVNTR
 import advntr.vntr_finder as vntr_finder_module
 from advntr.vntr_finder import SelectedRead, VNTRFinder
@@ -190,7 +191,8 @@ class _SinkFixture(unittest.TestCase):
     def _finder(self, vntr_id=1):
         reference = ReferenceVNTR(vntr_id, REFERENCE_UNIT, 100, 'chr1', None, None)
         reference.init_from_xml([REFERENCE_UNIT, REFERENCE_UNIT], 'TTTTTTTT', 'GGGGGGGG')
-        finder = _CallingFinder(reference)
+        finder = _CallingFinder(
+            reference, frameshift_policy=resolve_policy(0.001, 1))
         finder.hmm = _FakeHMM()
         return finder
 

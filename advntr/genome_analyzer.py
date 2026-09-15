@@ -7,10 +7,11 @@ from advntr.profiler import time_usage
 from advntr.sam_utils import extract_unmapped_reads_to_fasta_file
 from advntr.vntr_finder import VNTRFinder
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy, validate_policy
 
 class GenomeAnalyzer:
     def __init__(self, ref_vntrs, target_vntr_ids, working_dir='./', outfmt='text', is_haploid=False, ref_filename=None,
-                 input_file=None, is_frameshift_mode=False):
+                 input_file=None, is_frameshift_mode=False, frameshift_policy=None):
         self.reference_vntrs = ref_vntrs
         self.target_vntr_ids = target_vntr_ids
         self.working_dir = working_dir
@@ -18,11 +19,15 @@ class GenomeAnalyzer:
         self.is_haploid = is_haploid
         self.ref_filename = ref_filename
         self.input_file = input_file
+        self.frameshift_policy = (resolve_policy() if frameshift_policy is None
+                                  else validate_policy(frameshift_policy))
 
         self.vntr_finder = {}
         for ref_vntr in self.reference_vntrs:
             if ref_vntr.id in target_vntr_ids:
-                self.vntr_finder[ref_vntr.id] = VNTRFinder(ref_vntr, is_haploid, ref_filename, is_frameshift_mode)
+                self.vntr_finder[ref_vntr.id] = VNTRFinder(
+                    ref_vntr, is_haploid, ref_filename, is_frameshift_mode,
+                    frameshift_policy=self.frameshift_policy)
 
     def print_genotype(self, vntr_id, genotype_result):
         if self.outfmt == 'bed':
@@ -211,7 +216,7 @@ class GenomeAnalyzer:
     def find_frameshift_from_alignment_file(self, alignment_file):
         print("#Input File: {}".format(alignment_file))
         print("#Reference file: {}".format(self.ref_filename))
-        print("#P-value cutoff: {}".format(settings.INDEL_MUTATION_MIN_PVALUE))
+        print("#P-value cutoff: {}".format(self.frameshift_policy.cutoff))
         print("#VID\tState\tNumberOfSupportingReads\tMeanCoverage\tPvalue\tContext")
         for vid in self.target_vntr_ids:
             results = self.vntr_finder[vid].find_frameshift_from_alignment_file(alignment_file, [])

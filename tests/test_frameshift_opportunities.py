@@ -19,6 +19,7 @@ from cStringIO import StringIO
 
 from advntr import frameshift_opportunities
 from advntr import settings
+from advntr.frameshift_decisions import resolve_policy
 from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.reference_vntr import ReferenceVNTR
 import advntr.vntr_finder as vntr_finder_module
@@ -192,7 +193,8 @@ class TestFrameshiftOpportunities(unittest.TestCase):
 
         reference = ReferenceVNTR(1, REFERENCE_UNIT, 100, 'chr1', None, None)
         reference.init_from_xml([REFERENCE_UNIT, REFERENCE_UNIT], 'TTTTTTTT', 'GGGGGGGG')
-        self.finder = _CallingFinder(reference)
+        self.finder = _CallingFinder(
+            reference, frameshift_policy=resolve_policy(0.001, 1))
         self.finder.hmm = _FakeHMM()
 
     def tearDown(self):

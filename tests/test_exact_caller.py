@@ -33,6 +33,7 @@ from advntr import exact_caller
 from advntr import settings
 from advntr.exact_tail import exact_indel_tail
 from advntr.frameshift_background import BackgroundModelError
+from advntr.frameshift_decisions import resolve_policy
 from advntr.reference_vntr import ReferenceVNTR
 from advntr.vntr_finder import SelectedRead, VNTRFinder
 
@@ -290,12 +291,35 @@ class TestTheThreeDecisionSites(_ExactCallerTestCase):
         self.assertEqual(results['D3_2'][1], float(44) / 12 / 3)
 
     def test_a_candidate_below_the_support_floor_never_reaches_a_site(self):
-        settings.MIN_SUPPORTING_READ_COUNT = DRIVER_READS + 1
+        self.finder.frameshift_policy = resolve_policy(
+            0.001, DRIVER_READS + 1)
         results, messages = self._run_capturing_info()
 
         self.assertIsNone(results)
         self.assertEqual([line for line in messages if line.startswith('Observed')], [])
         self.assertEqual(len([line for line in messages if 'Skipped due to' in line]), 3)
+
+    def test_an_explicit_legacy_cutoff_is_run_local(self):
+        shipped_settings = (settings.INDEL_MUTATION_MIN_PVALUE,
+                            settings.MIN_SUPPORTING_READ_COUNT)
+        self.finder.frameshift_policy = resolve_policy(1e-8, 3)
+
+        results = self._by_state(self._run())
+
+        self.assertNotIn('I12_suffix_LEN1', results)
+        self.assertIn('D3_2', results)
+        self.assertEqual(shipped_settings,
+                         (settings.INDEL_MUTATION_MIN_PVALUE,
+                          settings.MIN_SUPPORTING_READ_COUNT))
+
+    def test_finders_keep_independent_policy_objects(self):
+        strict = resolve_policy(0.0001, 7)
+        other = VNTRFinder(self.finder.reference_vntr,
+                           is_frameshift_mode=True,
+                           frameshift_policy=strict)
+
+        self.assertIs(strict, other.frameshift_policy)
+        self.assertEqual(resolve_policy(), self.finder.frameshift_policy)
 
 
 class TestTheFlagIsWiredLikePruneReverse(_ExactCallerTestCase):
@@ -423,6 +447,13 @@ class TestTheExactCallerWithASyntheticBackground(_ExactCallerTestCase):
 
         self.assertIsNone(self._run())
 
+    def test_an_explicit_exact_cutoff_is_run_local(self):
+        shipped_cutoff = settings.INDEL_MUTATION_MIN_PVALUE
+        self.finder.frameshift_policy = resolve_policy(1e-8, 3)
+
+        self.assertIsNone(self._run())
+        self.assertEqual(shipped_cutoff, settings.INDEL_MUTATION_MIN_PVALUE)
+
     def test_the_shipped_statistic_is_not_consulted_at_all(self):
         """`identify_frameshift` is the malformed statistic (Q-DENOM, Q-STAT, Q-UNDER).
         With the flag on it must not contribute, not even a log line."""
@@ -542,6 +573,16 @@ class TestTheStartupCheckDoesNotWaitForReadSelection(_ExactCallerTestCase):
 
         self.assertIn(broken, message)
         self.assertIn('outside the open interval', message)
+
+    def test_invalid_run_local_policy_values_fail_at_startup(self):
+        for field, value, message in (
+                ('frameshift_pvalue_cutoff', float('nan'), 'cutoff'),
+                ('min_frameshift_read_support', 0, 'support')):
+            args = self._Args()
+            setattr(args, field, value)
+            with self.assertRaises(SystemExit) as caught:
+                advntr_commands.genotype(args, _SilentParser())
+            self.assertIn(message, str(caught.exception))
 
     def test_a_valid_artifact_gets_past_the_check(self):
         """It must fail later, on the input file, not on the background."""

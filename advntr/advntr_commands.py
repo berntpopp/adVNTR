@@ -9,6 +9,7 @@ from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.models import load_unique_vntrs_data, get_largest_id_in_database, save_reference_vntr_to_database
 from advntr.models import delete_vntr_from_database, create_vntrs_database
 from advntr import frameshift_background
+from advntr.frameshift_decisions import resolve_policy
 from advntr.reference_vntr import ReferenceVNTR
 from advntr.vntr_finder import VNTRFinder
 from advntr import settings
@@ -67,6 +68,13 @@ def genotype(args, genotype_parser):
                                      'enhanced HMM backend.')
     if args.alignment_file is None and args.fasta is None:
         print_error(genotype_parser, 'No input specified. Please specify alignment file or fasta file')
+
+    try:
+        frameshift_policy = resolve_policy(
+            getattr(args, 'frameshift_pvalue_cutoff', None),
+            getattr(args, 'min_frameshift_read_support', None))
+    except ValueError as error:
+        print_error(genotype_parser, str(error))
 
     if args.nanopore:
         settings.MAX_ERROR_RATE = 0.3
@@ -178,7 +186,8 @@ def genotype(args, genotype_parser):
 
     logging.info('Running adVNTR for %s VNTRs' % len(target_vids))
     genome_analyzier = GenomeAnalyzer(reference_vntrs, target_vids, working_directory, args.outfmt, args.haploid,
-                                      args.reference_filename, input_file, args.frameshift)
+                                      args.reference_filename, input_file, args.frameshift,
+                                      frameshift_policy=frameshift_policy)
 
     if args.min_read_length is not None:
         settings.MIN_READ_LENGTH = args.min_read_length
