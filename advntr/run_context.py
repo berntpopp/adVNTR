@@ -11,7 +11,7 @@ from advntr.frameshift_background import BackgroundModel
 from advntr.frameshift_decisions import resolve_policy, validate_policy
 
 
-_ContextTuple = namedtuple('_RunContext', 'capture frameshift background capture_path model_path')
+_ContextTuple = namedtuple('_RunContext', 'capture frameshift background capture_path model_path capture_version capture_assets')
 _LEGACY_FIELDS = {
     'maximum_error_rate': 'MAX_ERROR_RATE', 'threads': 'CORES',
     'minimum_read_length': 'MIN_READ_LENGTH', 'prune_reverse': 'PRUNE_REVERSE_DECODE',
@@ -28,8 +28,9 @@ class RunContext(_ContextTuple):
     """Validated immutable container; background is a separately loaded run asset."""
     __slots__ = ()
 
-    def __new__(cls, capture, frameshift, background, capture_path, model_path):
-        result = _ContextTuple.__new__(cls, capture, frameshift, background, capture_path, model_path)
+    def __new__(cls, capture, frameshift, background, capture_path, model_path, capture_version=1, capture_assets=None):
+        result = _ContextTuple.__new__(cls, capture, frameshift, background, capture_path, model_path,
+                                           capture_version, capture_assets)
         validate_context(result)
         return result
 
@@ -69,6 +70,18 @@ def validate_context(context):
             continue
         if not isinstance(value, basestring) or not value:
             raise ValueError('%s must be a nonempty path' % name)
+    if type(context.capture_version) is not int or context.capture_version not in (1, 2):
+        raise ValueError('capture version must be exactly 1 or 2')
+    if context.capture_version == 1:
+        if context.capture_assets is not None:
+            raise ValueError('capture v1 cannot contain v2 snapshot assets')
+    else:
+        from advntr.capture_assets import CaptureAssets
+        if (not context.capture.frameshift_mode or context.capture_path is None
+                or not isinstance(context.capture_assets, CaptureAssets)
+                or context.model_path != context.capture_assets.model_path):
+            raise ValueError('capture v2 requires frameshift mode, a sink, and verified run assets')
+        context.capture_assets.document(context.background)
     return context
 
 
@@ -87,6 +100,11 @@ def runtime_value(owner, field):
 def command_policies(args):
     """Resolve before asset I/O, without inheriting mutable prior-command settings."""
     get = lambda name, default=None: getattr(args, name, default)
+    version = get('frameshift_capture_version', 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError('capture version must be exactly 1 or 2')
+    if version == 2 and (not get('frameshift', False) or not get('frameshift_calibration_out') or get('append', False)):
+        raise ValueError('capture v2 requires --frameshift and --frameshift-calibration-out, and refuses --append')
     if get('pacbio', False) and get('nanopore', False):
         raise ValueError('--pacbio and --nanopore are mutually exclusive')
     if get('frameshift', False) and (get('pacbio', False) or get('nanopore', False)):

@@ -6,7 +6,7 @@ _DESTINATIONS = frozenset((
     'prune_reverse', 'filter_adapter_readthrough', 'min_read_match_ratio',
     'rare_unit_coverage_guard', 'noref_aln', 'fullru', 'models',
     'exact_frameshift_caller', 'frameshift_background', 'frameshift_pvalue_cutoff',
-    'min_frameshift_read_support', 'frameshift_calibration_out',
+    'min_frameshift_read_support', 'frameshift_calibration_out', 'frameshift_capture_version',
 ))
 
 

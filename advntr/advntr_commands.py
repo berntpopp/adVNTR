@@ -8,6 +8,7 @@ from advntr.genome_analyzer import GenomeAnalyzer
 from advntr.models import load_unique_vntrs_data, get_largest_id_in_database, save_reference_vntr_to_database
 from advntr.models import delete_vntr_from_database, create_vntrs_database
 from advntr import frameshift_background
+from advntr.capture_assets import prepare_capture_assets
 from advntr.run_context import RunContext, command_policies
 from advntr.reference_vntr import ReferenceVNTR
 from advntr.vntr_finder import VNTRFinder
@@ -73,35 +74,73 @@ def genotype(args, genotype_parser):
     except ValueError as error:
         print_error(genotype_parser, str(error))
 
-    background = None
-    if args.frameshift_calibration_out:
-        # Same reason as the background preflight below: the only other check is inside
-        # `finalise`, which runs after `select_illumina_reads` has decoded every read, so
-        # an unwritable path would otherwise cost a full read-selection pass before its
-        # IOError. The mode must be the writer's own 'a+b' and not 'a': `_append_line`
-        # reads the last byte back to avoid welding onto a torn line, so a
-        # writable-but-unreadable path passes an 'a' preflight and then fails inside
-        # `finalise` -- the exact cost this check exists to avoid.
-        try:
-            open(args.frameshift_calibration_out, 'a+b').close()
-        except IOError as error:
-            print_error(genotype_parser, '--frameshift-calibration-out is not writable: '
-                                         '%s' % error)
-    if args.exact_frameshift_caller:
-        if args.frameshift_background is None:
-            print_error(genotype_parser, '--exact-frameshift-caller needs a frozen '
-                                         'background model: pass '
-                                         '--frameshift-background <file>. There is '
-                                         'deliberately no built-in default.')
-        # Load it here, not only where it is used: `find_frameshift_from_selected_reads`
-        # runs after `select_illumina_reads` has decoded every read
-        # (advntr/vntr_finder.py:977-978), so a path that exists but does not validate
-        # would otherwise cost a full read-selection pass before failing.
-        try:
-            background = frameshift_background.load_background_model(args.frameshift_background)
-        except frameshift_background.BackgroundModelError as error:
-            print_error(genotype_parser, str(error))
+    version = getattr(args, 'frameshift_capture_version', 1)
+    model_path = args.models
+    if model_path is None:
+        model_path = settings.PACBIO_DEFAULT_MODELS_FILE if args.pacbio else settings.ILLUMINA_DEFAULT_MODELS_FILE
+    assets = None
+    try:
+        background = None
+        if version == 1 and args.frameshift_calibration_out:
+            _preflight_capture_sink(args.frameshift_calibration_out, genotype_parser, version)
+        if args.exact_frameshift_caller and args.frameshift_background is None:
+            print_error(genotype_parser, '--exact-frameshift-caller needs a frozen background model: '
+                                         'pass --frameshift-background <file>. There is deliberately no built-in default.')
+        if version == 2:
+            _validate_capture_destinations(args, model_path, genotype_parser)
+            try:
+                assets = prepare_capture_assets(model_path, args.frameshift_background if args.exact_frameshift_caller else None)
+            except (ValueError, IOError, OSError) as error:
+                print_error(genotype_parser, str(error))
+            model_path, background = assets.model_path, assets.background
+        elif args.exact_frameshift_caller:
+            try:
+                background = frameshift_background.load_background_model(args.frameshift_background)
+            except frameshift_background.BackgroundModelError as error:
+                print_error(genotype_parser, str(error))
+        context = RunContext(capture_policy, frameshift_policy, background,
+                             args.frameshift_calibration_out, model_path, version, assets)
+        return _genotype_run(args, genotype_parser, context)
+    finally:
+        if assets is not None:
+            assets.close()
 
+
+def _preflight_capture_sink(path, parser, version):
+    """V1 retains append; v2 starts a new one-sample sink after all asset checks."""
+    try:
+        if version == 1:
+            open(path, 'a+b').close()
+        else:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0600)
+            os.close(descriptor)
+    except (IOError, OSError) as error:
+        problem = 'not writable' if version == 1 else 'not a new writable sink'
+        print_error(parser, '--frameshift-calibration-out is %s: %s' % (problem, error))
+
+
+def _validate_capture_destinations(args, model_path, parser):
+    """Refuse v2 aliases that would overwrite or append to a source asset."""
+    if args.working_directory is None:
+        print_error(parser, 'Please specify working directory by -wd or --working_directory')
+    if os.path.lexists(args.frameshift_calibration_out):
+        print_error(parser, 'capture v2 requires a new output sink; existing evidence is never appended or replaced')
+    source = args.alignment_file if args.alignment_file else args.fasta
+    inputs = [path for path in (source, model_path, args.frameshift_background, args.reference_filename, args.vid_file) if path]
+    outputs = [args.frameshift_calibration_out,
+               os.path.join(args.working_directory, 'log_%s.log' % os.path.basename(source))]
+    if args.outfile:
+        outputs.append(args.outfile)
+    for index, destination in enumerate(outputs):
+        for other in inputs + outputs[:index]:
+            if (os.path.realpath(destination) == os.path.realpath(other)
+                    or (os.path.exists(destination) and os.path.exists(other) and os.path.samefile(destination, other))):
+                print_error(parser, 'capture v2 output paths must be distinct from inputs and each other')
+
+
+def _genotype_run(args, genotype_parser, run_context):
+    """Run ordinary genotyping against the already resolved per-command assets."""
+    background = run_context.background
     if args.expansion and args.coverage is None:
         print_error(genotype_parser, 'Please specify the average coverage to identify the expansion')
     average_coverage = args.coverage if args.expansion else None
@@ -133,16 +172,8 @@ def genotype(args, genotype_parser):
     if background is not None:
         logging.info(background.describe())
 
-    if args.outfile:
+    if args.outfile and run_context.capture_version == 1:
         sys.stdout = open(args.outfile, 'w')
-
-    models_file = args.models
-    if models_file is None:
-        models_file = settings.ILLUMINA_DEFAULT_MODELS_FILE
-        if args.pacbio:
-            models_file = settings.PACBIO_DEFAULT_MODELS_FILE
-    run_context = RunContext(capture_policy, frameshift_policy, background,
-                             args.frameshift_calibration_out, models_file)
 
     target_vids = []
     if args.vntr_id is not None:
@@ -154,6 +185,14 @@ def genotype(args, genotype_parser):
                 if vid not in processed_vids:
                     target_vids.append(vid)
     reference_vntrs = load_unique_vntrs_data(db_file=run_context.model_path, target_vids=target_vids)
+    if run_context.capture_version == 2:
+        if (not target_vids or len(target_vids) != len(set(target_vids)) or any(vid <= 0 for vid in target_vids)
+                or sorted(ref.id for ref in reference_vntrs) != sorted(target_vids)):
+            print_error(genotype_parser, 'capture v2 requires a unique explicit target roster present in the model')
+        run_context.capture_assets.document(background)
+        _preflight_capture_sink(args.frameshift_calibration_out, genotype_parser, 2)
+        if args.outfile:
+            sys.stdout = open(args.outfile, 'w')
 
     logging.info('Running adVNTR for %s VNTRs' % len(target_vids))
     genome_analyzier = GenomeAnalyzer(reference_vntrs, target_vids, working_directory, args.outfmt, args.haploid,

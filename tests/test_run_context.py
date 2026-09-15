@@ -209,3 +209,31 @@ class TestStrictCalibrationArguments(unittest.TestCase):
         args, _parser = parse_args(['--min-read-match-ratio=0.6', '--rare-unit-coverage-guard'])
         self.assertEqual(0.6, args.min_read_match_ratio)
         self.assertEqual(0.15, args.rare_unit_coverage_guard)
+
+
+class TestCaptureVersion(unittest.TestCase):
+    def test_default_v1_and_exact_version_option(self):
+        args, _ = parse_args([])
+        self.assertEqual(1, args.frameshift_capture_version)
+        args, _ = parse_args(['--frameshift-capture-version', '2'])
+        self.assertEqual(2, args.frameshift_capture_version)
+        for extra in (['--frameshift-capture-v', '2'], ['--frameshift-capture-version', '3'],
+                      ['--frameshift-capture-version', '1', '--frameshift-capture-version=2']):
+            with self.assertRaises(SystemExit):
+                parse_args(extra)
+
+    def test_v2_requires_explicit_frameshift_sink_and_run_assets(self):
+        from advntr.run_context import RunContext, command_policies
+        for extra in (['--frameshift-capture-version', '2'],
+                      ['-fs', '--frameshift-capture-version', '2'],
+                      ['--frameshift-calibration-out', 'x', '--frameshift-capture-version', '2'],
+                      ['-fs', '--frameshift-calibration-out', 'x', '--frameshift-capture-version', '2', '--append']):
+            args, _ = parse_args(extra)
+            with self.assertRaises(ValueError):
+                command_policies(args)
+        policy = resolve_capture_policy(frameshift_mode=True)
+        for version in (True, 0, 3, '2'):
+            with self.assertRaises(ValueError):
+                RunContext(policy, resolve_policy(), None, 'capture', 'model', capture_version=version)
+        with self.assertRaises(ValueError):
+            RunContext(policy, resolve_policy(), None, 'capture', 'model', capture_version=2)
