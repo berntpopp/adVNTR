@@ -113,9 +113,9 @@ moves the decision, not the rest of the table.
 """
 import logging
 
-from advntr.exact_tail import exact_indel_tail
 from advntr.frameshift_background import BackgroundModelError, load_background_model
-from advntr.frameshift_decisions import exact_call, resolve_policy, validate_policy
+from advntr.frameshift_decisions import resolve_policy, validate_policy
+from advntr.frameshift_statistics import StatisticDecision, exact_result
 from advntr import settings
 
 
@@ -195,7 +195,13 @@ def aggregate_evidence(records, state):
 
 
 def decide(records, state, background, cutoff=None, policy=None):
-    """`(called, pvalue)` for one candidate. `pvalue` is `None` when nothing was scored.
+    """Preserve the public ``(called, pvalue)`` projection of the shared result."""
+    result = decide_result(records, state, background, cutoff=cutoff, policy=policy)
+    return result.called, result.pvalue
+
+
+def decide_result(records, state, background, cutoff=None, policy=None):
+    """Shared statistic result with an explicit suppression disposition.
 
     `k > N` is reachable here and is refused, never clamped: see the module docstring.
     The scalar `cutoff` remains accepted for callers of the original public surface;
@@ -209,7 +215,7 @@ def decide(records, state, background, cutoff=None, policy=None):
     evidence = aggregate_evidence(records, state)
     if evidence is None:
         logging.warning('exact caller: no opportunity row for %s; not called', state)
-        return False, None
+        return StatisticDecision(False, None, None, 'missing-opportunity-row')
     support, opportunities = evidence
     if support == 0 and opportunities == 0:
         logging.warning('exact caller: %s has neither support nor opportunities: no '
@@ -226,9 +232,8 @@ def decide(records, state, background, cutoff=None, policy=None):
                         'for %s, so at least one attributed occurrence never offered '
                         'every component of it; not called',
                         support, opportunities, state)
-        return False, None
+        return exact_result(support, opportunities, None, policy)
     probability = background.probability_for(state)
     logging.info('Exact tail inputs: k=%d N=%d p0=%s' % (support, opportunities,
                                                          probability))
-    return (exact_call(support, opportunities, probability, policy),
-            exact_indel_tail(support, opportunities, probability))
+    return exact_result(support, opportunities, probability, policy)

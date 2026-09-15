@@ -10,7 +10,7 @@ from Bio import SeqIO, pairwise2
 from Bio.Seq import Seq
 
 from advntr import (adapter_filter, callable_cluster, coverage_guard,
-                    exact_caller, frameshift_decisions, read_selection,
+                    exact_caller, frameshift_decisions, frameshift_statistics, read_selection,
                     repeat_order, settings)
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.hmm_utils import *
@@ -181,15 +181,8 @@ class VNTRFinder:
     @staticmethod
     def identify_frameshift(location_coverage, observed_indel_transitions, expected_indels,
                             error_rate=settings.INDEL_ERROR_RATE):
-        if observed_indel_transitions > location_coverage:
-            return 0, 1.0, 0
-        from scipy.stats import binom, chi2
-        sequencing_error_prob = binom.pmf(observed_indel_transitions, location_coverage, error_rate)
-        frameshift_prob = binom.pmf(observed_indel_transitions, location_coverage, expected_indels)
-        chi_square_val = -2 * (binom.logpmf(observed_indel_transitions, location_coverage, error_rate) -
-                               binom.logpmf(observed_indel_transitions, location_coverage, expected_indels))
-        pval = chi2.sf(chi_square_val, 1)
-        return sequencing_error_prob, frameshift_prob, pval
+        return frameshift_statistics.legacy_statistic(
+            location_coverage, observed_indel_transitions, expected_indels, error_rate)
 
     @staticmethod
     def get_repeat_unit_number(read):
@@ -452,7 +445,7 @@ class VNTRFinder:
                 )
                 logging.info('Sequencing error prob: %s' % seq_err_prob)
                 logging.info('Frame-shift prob: %s' % frameshift_prob)
-                is_mutation = frameshift_decisions.legacy_call(pval, self.frameshift_policy)
+                is_mutation = frameshift_statistics.legacy_result(pval, self.frameshift_policy).called
             else:
                 is_mutation, pval = exact_caller.decide(self.last_frameshift_opportunities, candidate,
                                                         background, policy=self.frameshift_policy)

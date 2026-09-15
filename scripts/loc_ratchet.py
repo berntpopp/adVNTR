@@ -27,7 +27,8 @@ GRANDFATHERED = {
     # Issues #4, #7, #9 replace dead iteratively_update_model with NotImplementedError (-28),
     # wire in adapter filtering, compound event rejection and cluster validation: 1211 -> 1184.
     # Run-local frameshift policy extracts decisions and condenses their shared docstring: 1184 -> 1183.
-    'advntr/vntr_finder.py': 1183,
+    # Shared statistic result ABI extracts the inherited numerical formula: 1183 -> 1176.
+    'advntr/vntr_finder.py': 1176,
     'hmm/hmm.pyx': 693,
     'advntr/hmm_utils.py': 900,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
