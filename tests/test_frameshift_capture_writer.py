@@ -56,6 +56,24 @@ class TestCompletedCaptureWriter(unittest.TestCase):
             if read.query_name:
                 self.assertNotIn(read.query_name, json.dumps(record))
 
+    def test_zero_selected_reads_complete_with_full_model_geometry_and_no_visits(self):
+        self.assertIsNone(self.fixture._run([]))
+        with open(self.path) as handle:
+            records = [json.loads(line) for line in handle]
+        self.assertEqual(1, len(records))
+        record = records[0]
+        decoded = decode_capture(record)
+        self.assertEqual('completed-vntr', record['completion'])
+        self.assertEqual(0, record['locus']['selected_read_count'])
+        self.assertEqual(3, len(record['unit_geometry']))
+        self.assertEqual([0, 0, 0], [unit['ru_bp_coverage'] for unit in record['unit_geometry']])
+        self.assertEqual([], record['occurrences'])
+        self.assertEqual([], record['spans'])
+        self.assertEqual([], record['evidence_rows'])
+        self.assertEqual({'repeat_candidates': [], 'flank_candidates': []}, record['candidate_traversal'])
+        self.assertEqual([], record['decision_visits'])
+        self.assertEqual((), decoded.visits)
+
     def test_a_failed_decision_never_leaves_a_v2_completed_record(self):
         def fail(*args, **kwargs):
             raise ValueError('invented decision failure')
