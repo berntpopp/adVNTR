@@ -107,7 +107,11 @@ def genotype(args, genotype_parser):
 
 
 def _preflight_capture_sink(path, parser, version):
-    """V1 retains append; v2 starts a new one-sample sink after all asset checks."""
+    """V1 retains append; v2 starts a new one-sample sink after all asset checks.
+
+    A failed v2 run may retain completed per-locus records in a partial sink. Process
+    success and the controller's exact target roster establish whole-run completion.
+    """
     try:
         if version == 1:
             open(path, 'a+b').close()
@@ -191,32 +195,39 @@ def _genotype_run(args, genotype_parser, run_context):
             print_error(genotype_parser, 'capture v2 requires a unique explicit target roster present in the model')
         run_context.capture_assets.document(background)
         _preflight_capture_sink(args.frameshift_calibration_out, genotype_parser, 2)
-        if args.outfile:
-            sys.stdout = open(args.outfile, 'w')
+    original_stdout, output_handle = sys.stdout, None
+    try:
+        if args.outfile and run_context.capture_version == 2:
+            output_handle = open(args.outfile, 'w')
+            sys.stdout = output_handle
 
-    logging.info('Running adVNTR for %s VNTRs' % len(target_vids))
-    genome_analyzier = GenomeAnalyzer(reference_vntrs, target_vids, working_directory, args.outfmt, args.haploid,
-                                      args.reference_filename, input_file, args.frameshift,
-                                      run_context=run_context)
+        logging.info('Running adVNTR for %s VNTRs' % len(target_vids))
+        genome_analyzier = GenomeAnalyzer(reference_vntrs, target_vids, working_directory, args.outfmt, args.haploid,
+                                          args.reference_filename, input_file, args.frameshift,
+                                          run_context=run_context)
 
-    if args.pacbio:
-        if input_is_alignment_file:
-            genome_analyzier.find_repeat_counts_from_pacbio_alignment_file(input_file)
+        if args.pacbio:
+            if input_is_alignment_file:
+                genome_analyzier.find_repeat_counts_from_pacbio_alignment_file(input_file)
+            else:
+                genome_analyzier.find_repeat_counts_from_pacbio_reads(input_file, args.naive)
         else:
-            genome_analyzier.find_repeat_counts_from_pacbio_reads(input_file, args.naive)
-    else:
-        if args.frameshift:
-            genome_analyzier.find_frameshift_from_alignment_file(input_file)
-            if args.aln:
-                from advntr.hmm_alignment import generate_aln
-                ref_vntr_dict = {ref_vntr.id: ref_vntr for ref_vntr in reference_vntrs if ref_vntr.id in target_vids}
-                generate_aln(log_file, None, "", None, ref_vntr_dict)
-            # else:
-            #     print_error(genotype_parser, '--frameshift is not available for these VNTRs')
-        elif input_is_alignment_file:
-            genome_analyzier.find_repeat_counts_from_alignment_file(input_file, average_coverage, args.update)
-        else:
-            genome_analyzier.find_repeat_counts_from_short_reads(input_file)
+            if args.frameshift:
+                genome_analyzier.find_frameshift_from_alignment_file(input_file)
+                if args.aln:
+                    from advntr.hmm_alignment import generate_aln
+                    ref_vntr_dict = {ref_vntr.id: ref_vntr for ref_vntr in reference_vntrs if ref_vntr.id in target_vids}
+                    generate_aln(log_file, None, "", None, ref_vntr_dict)
+                # else:
+                #     print_error(genotype_parser, '--frameshift is not available for these VNTRs')
+            elif input_is_alignment_file:
+                genome_analyzier.find_repeat_counts_from_alignment_file(input_file, average_coverage, args.update)
+            else:
+                genome_analyzier.find_repeat_counts_from_short_reads(input_file)
+    finally:
+        if output_handle is not None:
+            sys.stdout = original_stdout
+            output_handle.close()
 
 
 def print_models(reference_vntrs):

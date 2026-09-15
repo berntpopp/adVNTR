@@ -1,7 +1,9 @@
 """V2 command assets are preflighted before sinks and closed on every outcome."""
+import __builtin__
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unittest
 
@@ -81,6 +83,40 @@ class TestCaptureAssetCommand(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_command()
         self.assertFalse(os.path.exists(self.contexts[0].model_path))
+
+    def test_v2_output_redirect_is_restored_and_closed_on_success_and_failure(self):
+        original_stdout = sys.stdout
+        output = os.path.join(self.root, 'genotype output.txt')
+        second_output = os.path.join(self.root, 'failed genotype output.txt')
+        redirected = []
+
+        def tracked_open(path, *args, **kwargs):
+            handle = __builtin__.open(path, *args, **kwargs)
+            if path in (output, second_output):
+                redirected.append(handle)
+            return handle
+
+        advntr_commands.open = tracked_open
+        try:
+            self.run_command(['--outfile', output])
+            self.assertIs(original_stdout, sys.stdout)
+
+            owner = self
+            class Failing(object):
+                def __init__(self, *args, **kwargs):
+                    owner.contexts.append(kwargs['run_context'])
+                def find_frameshift_from_alignment_file(self, path):
+                    raise RuntimeError('synthetic analysis failure')
+            advntr_commands.GenomeAnalyzer = Failing
+            self.sink = os.path.join(self.root, 'failed capture.jsonl')
+            with self.assertRaises(RuntimeError):
+                self.run_command(['--outfile', second_output])
+            self.assertIs(original_stdout, sys.stdout)
+        finally:
+            del advntr_commands.open
+
+        self.assertEqual(2, len(redirected))
+        self.assertTrue(all(handle.closed for handle in redirected))
 
     def test_missing_target_and_source_sink_collision_fail_before_writes(self):
         advntr_commands.load_unique_vntrs_data = lambda **kwargs: []
