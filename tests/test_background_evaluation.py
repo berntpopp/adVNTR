@@ -31,24 +31,70 @@ def _records():
 
 class TestSharedEvaluator(unittest.TestCase):
 
-    def test_packaged_report_matches_the_benchmark_report(self):
-        expected = accuracy_bench.build_report(_records(), compare=True)
-        self.assertEqual(expected,
-                         background_evaluation.build_report(_records(), compare=True))
+    def test_benchmark_uses_the_packaged_evaluator(self):
+        self.assertIs(accuracy_bench.build_report,
+                      background_evaluation.build_report)
+        self.assertIs(accuracy_bench.mcnemar_exact,
+                      background_evaluation.mcnemar_exact)
+        self.assertIs(accuracy_bench.wilson_ci,
+                      background_evaluation.wilson_ci)
 
-    def test_packaged_statistical_helpers_match_the_benchmark(self):
-        self.assertEqual(accuracy_bench.mcnemar_exact(1, 9),
-                         background_evaluation.mcnemar_exact(1, 9))
-        self.assertEqual(accuracy_bench.wilson_ci(7, 11),
-                         background_evaluation.wilson_ci(7, 11))
+    def test_packaged_report_has_the_expected_counts_and_discordance(self):
+        report = background_evaluation.build_report(_records(), compare=True)
+
+        self.assertEqual(1, report['schema_version'])
+        self.assertEqual('comparison', report['mode'])
+        self.assertEqual(4, report['sample_count'])
+        self.assertEqual({'carriers': 3, 'controls': 1},
+                         report['partitions'])
+        self.assertEqual({
+            'numerator': 2,
+            'denominator': 3,
+            'estimate': 2.0 / 3.0,
+            'ci95': [0.2076596008020477, 0.9385080552796037],
+        }, report['metrics']['baseline']['sensitivity'])
+        self.assertEqual({
+            'numerator': 1,
+            'denominator': 3,
+            'estimate': 1.0 / 3.0,
+            'ci95': [0.06149194472039621, 0.7923403991979522],
+        }, report['metrics']['candidate']['sensitivity'])
+        self.assertEqual({
+            'baseline_only': 1,
+            'candidate_only': 0,
+            'discordant_total': 1,
+            'p_value': 1.0,
+        }, report['comparison']['mcnemar']['carriers'])
+        self.assertEqual([{
+            'sample_id': 'compound-carrier',
+            'truth': True,
+            'baseline_call': True,
+            'candidate_call': False,
+            'direction': 'baseline_correct_to_candidate_incorrect',
+            'cause': 'candidate_false_negative',
+            'variant_class': 'compound',
+            'array_length': 33,
+        }], report['comparison']['discordances'])
+
+    def test_packaged_statistical_helpers_have_known_values(self):
+        self.assertEqual({
+            'p_value': 0.021484374999999997,
+            'baseline_only': 1,
+            'discordant_total': 10,
+            'candidate_only': 9,
+        }, background_evaluation.mcnemar_exact(1, 9))
+        lower, upper = background_evaluation.wilson_ci(7, 11)
+        self.assertAlmostEqual(0.35380117450784887, lower)
+        self.assertAlmostEqual(0.8483352890463243, upper)
+        with self.assertRaisesRegexp(ValueError, 'total must be positive'):
+            background_evaluation.wilson_ci(0, 0)
 
     def test_missing_candidate_call_is_rejected_identically(self):
         records = _records()
         del records[0]['candidate_call']
-        for evaluator in (accuracy_bench, background_evaluation):
-            with self.assertRaisesRegexp(
-                    ValueError, 'comparison record carrier-positive lacks candidate_call'):
-                evaluator.build_report(records, compare=True)
+        with self.assertRaisesRegexp(
+                ValueError, 'comparison record carrier-positive lacks candidate_call'):
+            background_evaluation.build_report(records, compare=True)
 
 
 if __name__ == '__main__':

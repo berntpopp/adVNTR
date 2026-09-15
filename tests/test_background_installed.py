@@ -102,7 +102,15 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
             [sys.executable, 'setup.py', 'sdist', '--dist-dir', dist], cwd=source)
         subprocess.check_call(
             [sys.executable, 'setup.py', 'bdist_wheel', '--dist-dir', dist], cwd=source)
-        artifacts = sorted(os.path.join(dist, name) for name in os.listdir(dist))
+        wheels = sorted(os.path.join(dist, name) for name in os.listdir(dist)
+                        if name.endswith('.whl'))
+        sdists = sorted(os.path.join(dist, name) for name in os.listdir(dist)
+                        if name.endswith('.tar.gz'))
+        if len(wheels) != 1:
+            raise AssertionError('expected one wheel, found %r' % wheels)
+        if len(sdists) != 1:
+            raise AssertionError('expected one sdist, found %r' % sdists)
+        artifacts = wheels + sdists
         cls.installations = []
         for artifact in artifacts:
             cls._assert_benchmark_script_absent(artifact)
@@ -156,6 +164,16 @@ class TestInstalledBackgroundFitter(unittest.TestCase):
     def test_wheel_and_sdist_run_the_fitter_outside_the_checkout(self):
         for name, site in self.installations:
             execution = tempfile.mkdtemp(prefix='advntr-fit-execution-', dir=self.tempdir)
+            evaluator_file = subprocess.check_output(
+                [sys.executable, '-c',
+                 'import os; import advntr.background_evaluation as e; '
+                 'print(os.path.realpath(e.__file__))'],
+                cwd=execution, env=self._environment(site)).strip()
+            real_site = os.path.realpath(site)
+            self.assertTrue(
+                evaluator_file.startswith(real_site + os.sep),
+                '%s imported evaluator from %s instead of %s' %
+                (name, evaluator_file, real_site))
             capture_root = os.path.join(execution, 'captures')
             labels = _write_inputs(capture_root)
             out_dir = os.path.join(execution, 'output')
