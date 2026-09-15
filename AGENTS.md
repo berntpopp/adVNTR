@@ -9,7 +9,7 @@ Instructions for anyone — human or agent — changing this repository.
 [FORK.md](FORK.md) first: it records the divergence point, the supported surface, and why
 there is no `upstream` remote.
 
-The supported path is two commands:
+The supported calibration and genotyping commands are:
 
 1. Genotyping:
 ```
@@ -23,6 +23,15 @@ advntr fit-background --capture-root <root> --labels <manifest.json> \
        --partition calibration --out-dir <dir> --profile <name>
 ```
 
+3. Complete-evidence replay and installed capabilities:
+```
+advntr replay-frameshift --capture-root <dir> --manifest <manifest.json> \
+       --policy <policy.json> --output <new-dir>
+advntr capabilities --json
+```
+
+See [CALIBRATION.md](CALIBRATION.md) for the complete capture and fitting contracts.
+
 Everything else (`makedb`, copy-number genotyping, PacBio, plotting) still compiles and
 imports, but is untested and unsupported. Long-read flags (`--pacbio`, `--nanopore`)
 cannot be combined with `--frameshift`: the command refuses them before opening a
@@ -34,7 +43,7 @@ options and diagnostic policy use these explicit values; commands do not mutate
 policy settings for later invocations. The selected model path, loaded background
 and capture destination are separate run assets. Backgrounds load once per command,
 not from a process-wide path cache. Direct legacy library callers retain their
-settings-based compatibility path. This does not advertise capture v2 or replay.
+settings-based compatibility path. Capture v2 and replay use the explicit context.
 Calibration-affecting options require exact spellings and cannot be repeated, even
 through aliases. Raw adapter ratio None keeps its historical effective value 0.60;
 it is not silently converted into a calibrated-v2 policy document.
@@ -82,9 +91,10 @@ installed fitting never loads or executes a checkout's `scripts/accuracy_bench.p
 
 `advntr capabilities --json` emits the closed `advntr-capabilities-v1` contract.
 Only the exact `--json` spelling is accepted; duplicates and option abbreviations fail.
-Currently advertised features are installed background fitting, calibration capture v1,
-and run-local frameshift policy. No replay capability or JSON policy schema is claimed.
-The numerical background recipe remains `recipe-v1`.
+Advertised features include installed background fitting, calibration captures v1/v2,
+run-local frameshift policy, and frameshift replay. Caller and replay JSON policy
+schemas are explicitly versioned. The numerical background recipe remains `recipe-v1`;
+its reference support and screen target do not follow runtime diagnostic overrides.
 
 `build_id` binds all package Python sources and compiled extension bytes, plus the
 canonical source-attestation digest. Caches and generated identity documents are excluded
@@ -285,11 +295,16 @@ from `--frameshift-background <file>`.
   aggregated event is "at least one component", whose null rate is not a per-slot `p0`;
   and an aggregated `k == 0` is reported at a tail of 1.0 with a warning.
 
-### `--frameshift-calibration-out`: a capture surface, not a caller
+### `--frameshift-calibration-out`: legacy v1 capture
+
+The following measurements and format limitations concern **v1**, the default.
+Opt-in `--frameshift-capture-version 2` uses anonymous occurrence identities, verified
+asset snapshots, completed decision receipts, and strict new-sink semantics described
+in [CALIBRATION.md](CALIBRATION.md). Its writer runs after decision/context completion.
+A partial failed run remains unusable without process success and the exact target roster.
 
 The third default-off flag (Task 8h; `advntr/settings.py` `FRAMESHIFT_CALIBRATION_OUT`,
-default `None`, written from `args.frameshift_calibration_out` at
-`advntr/advntr_commands.py:81`). It moves no decision at all: with it set,
+default `None`, resolved into the run context by `advntr/advntr_commands.py`). It moves no decision at all: with it set,
 `OpportunityCounter.finalise` appends one record and returns exactly what it returned
 before. **Measured through the real CLI on `example_66bf_hg19_subset.bam`: the emitted
 six-column table is byte-identical across pre-change flag-off, post-change flag-off and
