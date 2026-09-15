@@ -117,15 +117,15 @@ filtering/         Standalone C++ k-mer prefilter. Not built. See Traps.
 
 ### File size
 
-New files must be under **650 LOC**. These are already over and may **only shrink** — if
-you touch one, leave it smaller than you found it:
+New files must be under **650 LOC**. The files below have explicit ceilings and may
+**only shrink** — if you touch one, leave it smaller than you found it:
 
 | File | LOC |
 |---|---|
 | `advntr/plot.py` | 1445 |
 | `advntr/vntr_finder.py` | 1176 |
 | `hmm/hmm.pyx` | 693 |
-| `advntr/hmm_utils.py` | 900 |
+| `advntr/hmm_utils.py` | 575 |
 | `hmm/_viterbi_fill_core.pxi` | 199 |
 
 `pomegranate/` is excluded: not compiled, not maintained.

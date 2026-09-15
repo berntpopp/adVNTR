@@ -30,7 +30,8 @@ GRANDFATHERED = {
     # Shared statistic result ABI extracts the inherited numerical formula: 1183 -> 1176.
     'advntr/vntr_finder.py': 1176,
     'hmm/hmm.pyx': 693,
-    'advntr/hmm_utils.py': 900,
+    # Extract the working model constructors; retain the funded ceiling: 900 -> 575.
+    'advntr/hmm_utils.py': 575,
     # The actual Viterbi DP fill (Task 3 fix round 1): hmm.pyx and hmm_instrumented.pyx
     # each `include` this file, so it is hand-maintained exactly like hmm.pyx is, and
     # was invisible to this ratchet before this entry -- .pxi was not a checked
