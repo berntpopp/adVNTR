@@ -75,7 +75,7 @@ def genotype(args, genotype_parser):
         print_error(genotype_parser, str(error))
 
     version = getattr(args, 'frameshift_capture_version', 1)
-    model_path = args.models
+    model_path = getattr(args, 'models', None)
     if model_path is None:
         model_path = settings.PACBIO_DEFAULT_MODELS_FILE if args.pacbio else settings.ILLUMINA_DEFAULT_MODELS_FILE
     assets = None
