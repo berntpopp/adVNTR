@@ -40,9 +40,11 @@ class TestCapabilities(unittest.TestCase):
         self.assertEqual(__version__, result['package_version'])
         self.assertIsNone(result['source_revision'])
         self.assertEqual(['fit-background-installed-v1', 'frameshift-calibration-capture-v1',
-                          'frameshift-run-local-policy-v1'], result['capabilities'])
-        self.assertEqual([1], result['capture_schema_versions'])
-        self.assertEqual([], result['policy_schema_versions'])
+                          'frameshift-run-local-policy-v1', 'frameshift-calibration-capture-v2',
+                          'frameshift-replay-v1'], result['capabilities'])
+        self.assertEqual([1, 2], result['capture_schema_versions'])
+        self.assertEqual(['advntr-frameshift-policy-v1', 'advntr-frameshift-replay-policy-v1'],
+                         result['policy_schema_versions'])
         self.assertEqual(['recipe-v1'], result['background_recipe_ids'])
         self.assertNotIn(self.root, json.dumps(result))
 

@@ -162,8 +162,9 @@ def describe_capabilities(package_root=None):
         'build_id': build_id,
         'source_revision': revision,
         'capabilities': ['fit-background-installed-v1', 'frameshift-calibration-capture-v1',
-                         'frameshift-run-local-policy-v1'],
-        'capture_schema_versions': [1],
-        'policy_schema_versions': [],
+                         'frameshift-run-local-policy-v1', 'frameshift-calibration-capture-v2',
+                         'frameshift-replay-v1'],
+        'capture_schema_versions': [1, 2],
+        'policy_schema_versions': ['advntr-frameshift-policy-v1', 'advntr-frameshift-replay-policy-v1'],
         'background_recipe_ids': ['recipe-v1'],
     }
