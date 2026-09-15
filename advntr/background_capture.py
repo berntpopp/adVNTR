@@ -36,22 +36,27 @@ def read_sink(path):
                     'mid-write leaves a torn line; the fit stops here rather than '
                     'silently dropping this sample\'s denominators'
                     % (path, number, error))
-            if not isinstance(document, dict):
-                raise FitterError('sink %s:%d: line is not a JSON object' % (path, number))
-            if document.get('schema') != SINK_SCHEMA:
-                raise FitterError('sink %s:%d: schema is %r, expected %r'
-                                  % (path, number, document.get('schema'), SINK_SCHEMA))
-            if document.get('version') != SINK_VERSION:
-                raise FitterError('sink %s:%d: version is %r, expected %r'
-                                  % (path, number, document.get('version'),
-                                     SINK_VERSION))
-            for field in ('vntr_id', 'read_length', 'is_haploid', 'spans', 'candidates'):
-                if field not in document:
-                    raise FitterError('sink %s:%d: no %r field' % (path, number, field))
+            validate_sink_document(document, path, number)
             documents.append(document)
     if not documents:
         raise FitterError('sink %s: no lines at all' % path)
     return documents
+
+
+def validate_sink_document(document, path, number):
+    """Validate v1 parsed content without reopening a caller-owned input path."""
+    if not isinstance(document, dict):
+        raise FitterError('sink %s:%d: line is not a JSON object' % (path, number))
+    if document.get('schema') != SINK_SCHEMA:
+        raise FitterError('sink %s:%d: schema is %r, expected %r'
+                          % (path, number, document.get('schema'), SINK_SCHEMA))
+    if document.get('version') != SINK_VERSION:
+        raise FitterError('sink %s:%d: version is %r, expected %r'
+                          % (path, number, document.get('version'),
+                             SINK_VERSION))
+    for field in ('vntr_id', 'read_length', 'is_haploid', 'spans', 'candidates'):
+        if field not in document:
+            raise FitterError('sink %s:%d: no %r field' % (path, number, field))
 
 
 def _identities(raw):

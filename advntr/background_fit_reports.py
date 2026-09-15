@@ -1,5 +1,5 @@
 """Task 8c: Reporting, prediction checks, and diagnostic tables for background fitting."""
-from advntr import settings
+from advntr.background_fit_policy import resolve_diagnostic_policy
 from advntr import background_fitter as bf
 
 #: 8b 1.3's proxy-derived class denominators, quoted so prediction 5 has something to
@@ -218,6 +218,7 @@ def summarise_cv(bench, result):
 
 def falsification(samples, states, fit, cv_summary, args, bench, hyperparameters):
     """The 8b 5.2 checks this fitter can run, and an honest note on the two it cannot."""
+    diagnostic_policy = resolve_diagnostic_policy(args)
     controls = [sample for sample in samples if not sample['truth']]
     control_observations = [bf.CaptureObservation(sample['capture'])
                             for sample in controls]
@@ -232,7 +233,7 @@ def falsification(samples, states, fit, cv_summary, args, bench, hyperparameters
     shuffled_records = []
     for sample in samples:
         replay = bf.replay_sample(sample['capture'], sample['tested'], shuffled_model,
-                                  settings.INDEL_MUTATION_MIN_PVALUE)
+                                  diagnostic_policy['cutoff'], diagnostic_policy)
         shuffled_records.append({'sample_id': sample['sample_id'],
                                  'truth': sample['truth'],
                                  'baseline_call': sample['baseline_call'],
@@ -247,7 +248,7 @@ def falsification(samples, states, fit, cv_summary, args, bench, hyperparameters
         adjusted = dict(hyperparameters)
         adjusted.update(override)
         result = bf.cross_validate(samples, states, adjusted, args.folds,
-                                   settings.INDEL_MUTATION_MIN_PVALUE)
+                                   diagnostic_policy['cutoff'], diagnostic_policy)
         ablations[name] = summarise_cv(bench, result)
 
     regression = bf.k_versus_n_regression(control_observations, sorted(states),
@@ -380,4 +381,3 @@ def predictions(samples, fit, cv_summary, falsification_result, hyperparameters)
                           for value in ratio_values)),
     }
     return verdicts
-

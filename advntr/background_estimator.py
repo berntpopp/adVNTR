@@ -16,13 +16,13 @@ SINK_VERSION = 1
 #: The frozen estimator. Pre-registered 2026-09-03; not tunable, and read from here by
 #: every code path so a change is a one-line diff a reviewer cannot miss.
 HYPERPARAMETERS = {
-    'kprot': 4,                       # MIN_SUPPORTING_READ_COUNT + 1
+    'kprot': 4,                       # recipe-v1 reference support (3) + 1
     'phi': 2.0,
     'min_events': 10,                 # MIN_EVENTS
     'dispersion_threshold': 3.0,      # X^2/df above which the Bernoulli null is refuted
     'dispersion_min_events': 20,      # screen eligibility: sum_i k_is
     'dispersion_min_samples': 15,     # screen eligibility: contributing control samples
-    'floor_target': 0.001,            # settings.INDEL_MUTATION_MIN_PVALUE
+    'floor_target': 0.001,            # recipe-v1 screen target, not the diagnostic cutoff
     #: NOT a hyperparameter of the frozen estimator. Always True for any fit that is
     #: emitted; set False only by the 8b 5.2 component ablation, which needs a run with
     #: the multiplicity floor removed. `advntr/frameshift_background.py` refuses `p0 = 0`,
@@ -35,8 +35,8 @@ HYPERPARAMETERS = {
 #: schema, so the ablation reports what the smallest loadable value does instead.
 ABLATION_EPSILON = 1e-12
 
-#: `advntr/settings.py:43`. Read here rather than imported so the fitter states its own
-#: dependency on the number; asserted against the shipped value by `fit_background.py`.
+#: Historical reference support retained by recipe-v1. This exported compatibility
+#: name is not coupled to runtime settings or the separate diagnostic caller policy.
 SETTINGS_MIN_SUPPORTING_READ_COUNT = 3
 
 #: The largest `p0` `advntr/frameshift_background.py` will load. See ruling 5.
@@ -554,4 +554,3 @@ def sidecar_document(profile_name, profile_version, fit, context, notes):
         'not_a_production_default': True,
         'notes': notes,
     }
-

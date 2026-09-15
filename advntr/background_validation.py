@@ -12,7 +12,7 @@ from advntr.background_estimator import FitterError, fit_background
 from advntr.exact_caller import aggregate_evidence
 from advntr.exact_tail import tail_below_cutoff
 
-def replay_sample(capture, tested, model, cutoff):
+def replay_sample(capture, tested, model, cutoff, diagnostic_policy=None):
     """Flag-on replay of one sample: exactly what `advntr/exact_caller.py` would decide.
 
     `tested` is the log-derived map of states that reached a decision site with count
@@ -21,6 +21,15 @@ def replay_sample(capture, tested, model, cutoff):
     otherwise call iff the exact tail is below the cutoff. The sample-level call is
     "any state called", which is the rule the baseline used (`call = data_rows > 0`).
     """
+    if hasattr(capture, 'completed'):
+        from advntr.background_capture_v2 import replay_fit_capture
+        from advntr.background_fit_policy import DEFAULT_DIAGNOSTIC
+        policy = dict(DEFAULT_DIAGNOSTIC, cutoff=cutoff) if diagnostic_policy is None else diagnostic_policy
+        return replay_fit_capture(capture, model, policy)
+    if diagnostic_policy is not None:
+        from advntr.background_fit_policy import require_diagnostic_capture
+        require_diagnostic_capture(capture, diagnostic_policy)
+        cutoff = diagnostic_policy['cutoff']
     called_states = []
     details = []
     k_exceeds_n = 0
@@ -272,7 +281,7 @@ def _pearson_correlation(pairs):
     return covariance / math.sqrt(variance_k * variance_n)
 
 
-def cross_validate(records, states, hyperparameters, folds, cutoff):
+def cross_validate(records, states, hyperparameters, folds, cutoff, diagnostic_policy=None):
     """5-fold CV blocked on `pair_id`, refitting EVERYTHING inside each training fold.
 
     8b 5.1: per-state rates, class rates, the dispersion screen and the floors are all
@@ -304,7 +313,7 @@ def cross_validate(records, states, hyperparameters, folds, cutoff):
         calls = {}
         for sample_id in held_out:
             record = by_id[sample_id]
-            replay = replay_sample(record['capture'], record['tested'], model, cutoff)
+            replay = replay_sample(record['capture'], record['tested'], model, cutoff, diagnostic_policy)
             calls[sample_id] = replay
             scored.append({'sample_id': sample_id, 'truth': bool(record['truth']),
                            'baseline_call': bool(record['baseline_call']),
@@ -318,6 +327,7 @@ def cross_validate(records, states, hyperparameters, folds, cutoff):
             'trained_on': sorted(record['sample_id'] for record in training),
             'training_controls': len(control_observations),
             'hyperparameters': dict(hyperparameters),
+            'diagnostic_policy': diagnostic_policy,
             'screened_states': fit.screened_states,
             'default_probability': fit.default_probability,
             'calls': dict((sample_id, replay['called'])

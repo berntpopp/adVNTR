@@ -8,13 +8,19 @@ import json
 import os
 import sys
 
-from advntr import settings
 from advntr import background_evaluation
 from advntr import background_fitter as bf
 from advntr import background_fit_reports as bfr
 from advntr.frameshift_background import BackgroundModelError, load_background_model
+from advntr.background_capture_v2 import load_fit_capture, require_fit_identity
+from advntr.background_fit_policy import RECIPE_ID, resolve_diagnostic_policy, require_diagnostic_capture
+from advntr.capabilities import canonical_bytes, describe_capabilities
 
 def add_fit_background_arguments(parser):
+    parser.add_argument('--background-recipe', choices=(RECIPE_ID,), default=RECIPE_ID,
+                        help='frozen numerical estimator recipe (independent of diagnostic policy)')
+    parser.add_argument('--diagnostic-policy', default=None,
+                        help='closed frameshift caller-policy JSON for CV and replay diagnostics')
     parser.add_argument('--capture-root', required=True,
                         help='capture root holding runs/<sample>/output/<sink>')
     parser.add_argument('--labels', required=True,
@@ -57,7 +63,26 @@ def add_fit_background_arguments(parser):
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_fit_background_arguments(parser)
+    validate_fit_arguments(parser, argv)
     return parser.parse_args(argv)
+
+
+def validate_fit_arguments(parser, arguments):
+    """Reject ambiguous spelling and duplicates before opening a study input."""
+    seen = set()
+    for token in arguments:
+        if token == '--':
+            break
+        parsed = parser._parse_optional(token)
+        if parsed is None or parsed[0] is None:
+            continue
+        action = parsed[0]
+        spelling = token.split('=', 1)[0]
+        if spelling not in action.option_strings:
+            parser.error('fit-background options require exact spelling: %s' % token)
+        if action.dest in seen and action.dest != 'note':
+            parser.error('duplicate fit-background option: %s' % spelling)
+        seen.add(action.dest)
 
 
 def effective_hyperparameters(args):
@@ -131,6 +156,9 @@ def ingest(args, labels):
     baseline_records = (_load_baseline_records(args.baseline_records)
                         if args.baseline_records else None)
     samples = []
+    diagnostic_policy = resolve_diagnostic_policy(args)
+    installed_producer = None
+    control_groups = set()
     checks = {'round_trip_failures': [], 'shipped_disagreements': [],
               'aggregation_divergences': [], 'baseline_mismatches': [],
               'read_lengths': {}, 'repeat_units': None, 'repeat_unit_mismatch': [],
@@ -139,7 +167,20 @@ def ingest(args, labels):
     for record, sink, run_dir in discover_sinks(args.capture_root, labels,
                                                 args.sink_name):
         sample_id = record['sample_id']
-        capture = bf.load_capture(sample_id, sink)
+        capture = load_fit_capture(sample_id, sink)
+        require_diagnostic_capture(capture, diagnostic_policy)
+        if hasattr(capture, 'completed'):
+            if installed_producer is None:
+                described = describe_capabilities()
+                installed_producer = dict((key, described[key]) for key in ('package_version', 'build_id', 'source_revision'))
+            if canonical_bytes(capture.fit_identity['producer']) != canonical_bytes(installed_producer):
+                _fail('capture producer differs from the installed fitting producer')
+            if not record['truth']:
+                if record['pair_id'] in control_groups:
+                    _fail('v2 fitting requires one primary negative observation per independent group')
+                control_groups.add(record['pair_id'])
+        if samples:
+            require_fit_identity(samples[0]['capture'], capture)
         failures = capture.round_trip_failures()
         if failures:
             checks['round_trip_failures'].append({'sample_id': sample_id,
@@ -157,13 +198,15 @@ def ingest(args, labels):
                 logs = sorted(n for n in os.listdir(work) if n.endswith('.log'))
                 if len(logs) == 1:
                     log_path = os.path.join(work, logs[0])
-        decisions = bf.parse_decision_log(log_path)
+        decisions = (capture.completed_decisions if hasattr(capture, 'completed')
+                     else bf.parse_decision_log(log_path))
         divergences = bf.aggregation_fidelity(capture, decisions['tested'])
         if divergences:
             checks['aggregation_divergences'].append({'sample_id': sample_id,
                                                       'divergences': divergences[:20],
                                                       'count': len(divergences)})
-        data_rows = _baseline_from_result_json(run_dir)
+        data_rows = (len(decisions['called']) if hasattr(capture, 'completed')
+                     else _baseline_from_result_json(run_dir))
         log_calls = len(decisions['called'])
         baseline_call = data_rows > 0
         expected = baseline_call
@@ -297,15 +340,7 @@ def prove_loader_acceptance(artifact_path, document, out_dir):
 def run(args):
     if args.worktree is not None:
         _fail('--worktree is deprecated; fit-background uses the packaged evaluator')
-    if bf.SETTINGS_MIN_SUPPORTING_READ_COUNT != settings.MIN_SUPPORTING_READ_COUNT:
-        _fail('this fitter assumes MIN_SUPPORTING_READ_COUNT = %d but the shipped '
-              'settings say %d' % (bf.SETTINGS_MIN_SUPPORTING_READ_COUNT,
-                                   settings.MIN_SUPPORTING_READ_COUNT))
-    if abs(bf.HYPERPARAMETERS['floor_target']
-           - settings.INDEL_MUTATION_MIN_PVALUE) > 0:
-        _fail('the pre-registered floor target %r is not the shipped cutoff %r'
-              % (bf.HYPERPARAMETERS['floor_target'],
-                 settings.INDEL_MUTATION_MIN_PVALUE))
+    diagnostic_policy = resolve_diagnostic_policy(args)
     if not os.path.isdir(args.out_dir):
         os.makedirs(args.out_dir)
     bench = background_evaluation
@@ -376,12 +411,16 @@ def run(args):
     sidecar['loader_proof'] = loader_proof
     sidecar['preregistration_overrides'] = overrides
     sidecar['preregistered_hyperparameters'] = bf.HYPERPARAMETERS
+    sidecar['background_recipe_id'] = RECIPE_ID
+    sidecar['diagnostic_policy'] = diagnostic_policy
+    sidecar['capture_identity'] = getattr(samples[0]['capture'], 'fit_identity', None)
+    sidecar['independent_control_groups'] = len(controls) if hasattr(samples[0]['capture'], 'completed') else None
     sidecar['class_n_median_raw'] = fit.class_n_median_raw
     sidecar['class_n_median_clamped_to_kprot'] = fit.class_n_median_clamped_to_kprot
     bf.write_json(os.path.join(args.out_dir, '%s.sidecar.json' % args.profile), sidecar)
 
     cv_result = bf.cross_validate(samples, sorted(grammar), hyperparameters,
-                                  args.folds, settings.INDEL_MUTATION_MIN_PVALUE)
+                                  args.folds, diagnostic_policy['cutoff'], diagnostic_policy)
     cv_summary = bfr.summarise_cv(bench, cv_result)
     cv_summary['folds'] = cv_result['folds']
     bf.write_json(os.path.join(args.out_dir, '%s.cv.json' % args.profile), cv_summary)
@@ -428,7 +467,8 @@ def run(args):
             'k_exceeds_n_detail': dict(
                 (sample_id, violations) for sample_id, violations
                 in cardinality.items() if violations),
-            'subset_property_note': (
+            'subset_property_note': ('v2 complete occurrence identities passed the independent attribution subset audit.'
+                if hasattr(samples[0]['capture'], 'completed') else
                 'only cardinality (k <= N) is checkable offline: the sink stores a '
                 'COUNT per span signature, not the identities behind it, so set '
                 'membership is unanswerable here and is not claimed. The set property '
@@ -457,6 +497,8 @@ def run(args):
         },
         'depth_distribution': depth,
         'hyperparameters': hyperparameters,
+        'background_recipe_id': RECIPE_ID,
+        'diagnostic_policy': diagnostic_policy,
         'preregistration_overrides': overrides,
         'preregistered_hyperparameters': bf.HYPERPARAMETERS,
         'class_n_median_raw': fit.class_n_median_raw,
