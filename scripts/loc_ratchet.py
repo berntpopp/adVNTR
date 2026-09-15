@@ -30,7 +30,8 @@ GRANDFATHERED = {
     # Shared statistic result ABI extracts the inherited numerical formula: 1183 -> 1176.
     # Run context propagation extracts finder HMM construction: 1176 -> 1141.
     # Shared candidate scoring extraction: 1141 -> 1048.
-    'advntr/vntr_finder.py': 1048,
+    # Completed capture extraction: 1048 -> 1047.
+    'advntr/vntr_finder.py': 1047,
     'hmm/hmm.pyx': 693,
     # Extract the working model constructors; retain the funded ceiling: 900 -> 575.
     # Explicit read-coverage gate extraction: 575 -> 569.

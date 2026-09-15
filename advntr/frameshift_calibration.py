@@ -230,6 +230,8 @@ def write_if_configured(finder, is_haploid, span_counts, records):
     and for what no writer can guarantee.
     """
     context = getattr(finder, 'run_context', None)
+    if context is not None and context.capture_version == 2:
+        return None  # V2 writes only after native decisions and context assertions complete.
     path = settings.FRAMESHIFT_CALIBRATION_OUT if context is None else context.capture_path
     if not path:
         return None

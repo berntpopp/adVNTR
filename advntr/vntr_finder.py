@@ -13,11 +13,12 @@ from advntr import (adapter_filter, callable_cluster,
                     exact_caller, frameshift_decisions, frameshift_statistics, read_selection,
                     repeat_order, settings)
 from advntr.frameshift_calling import call_frameshift_candidates
+from advntr.frameshift_capture_writer import complete_frameshift_calls
 from advntr.frameshift_opportunities import OpportunityCounter
 from advntr.finder_hmm import FinderHMM
 from advntr.run_context import bind_owner, runtime_value
 from advntr.hmm_utils import *
-from advntr.mutation_keys import (encode_frameshift_context, evidence_for_candidate,
+from advntr.mutation_keys import (evidence_for_candidate,
                                   extract_raw_mutations, legacy_mutation_candidates)
 from advntr.pacbio_haplotyper import PacBioHaplotyper
 from advntr.profiler import time_usage
@@ -195,7 +196,9 @@ class VNTRFinder(FinderHMM):
             max_covered_repeat = self.hmm.read_length_used_to_build_model / repeat_unit_length
         reference_units = [cluster[0] for cluster in pattern_clusters]
         opportunities = OpportunityCounter(pattern_clusters, estimated_ru_count, hmm_match_count, self.is_haploid, self)
+        selected_read_count = 0
         for selected_read_index, read in enumerate(selected_reads):
+            selected_read_count = selected_read_index + 1
             if runtime_value(self, 'use_reference_alignment'):
                 # TODO: Read Vpath once
                 read_as_repeat_unit_number, annotated_read, unit_start_points = self.get_repeat_unit_number(read)
@@ -387,12 +390,8 @@ class VNTRFinder(FinderHMM):
             self, mutations, prefix_suffix_mutations, ru_bp_coverage, hmm_match_count,
             estimated_ru_count, reference_repeat_order, background)
 
-        for state, _count, _coverage, _pval in frameshifts:
-            evidence = self.last_frameshift_evidence[state]
-            if not evidence:
-                raise AssertionError('called frameshift lacks context evidence: %s' % state)
-            self.last_frameshift_context[state] = encode_frameshift_context(evidence)
-        return frameshifts if len(frameshifts) > 0 else None
+        return complete_frameshift_calls(self, frameshifts, opportunities, ru_bp_coverage,
+                                          reference_repeat_order, selected_read_count)
 
     def read_flanks_repeats_with_confidence(self, vpath):
         minimum_left_flanking = 5
